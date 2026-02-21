@@ -1,0 +1,49 @@
+You are a knowledge extraction specialist. Extract structured knowledge units from the provided text chunk.
+
+**Text Language:** {{ language_detected }}
+**Source:** Book "{{ book_title }}", Chapter "{{ chapter_title }}", Pages {{ page_start }}–{{ page_end }}
+
+**Instructions:**
+1. Extract ALL distinct knowledge units: definitions, claims, processes, comparisons.
+2. For each unit, identify the subject, predicate, and object (where applicable).
+3. Every unit MUST cite at least one evidence snippet from the provided text.
+4. Do NOT generate claims not supported by the text.
+5. Return ONLY valid JSON. No explanation outside the JSON.
+
+**Output Contract:**
+```json
+{
+  "units": [
+    {
+      "type": "claim|definition|process|comparison",
+      "language": "{{ language_detected }}",
+      "subject": "string or null",
+      "predicate": "string or null (max 50 chars)",
+      "object": "string or null",
+      "conditions": "string or null",
+      "confidence": 0.0–1.0,
+      "evidence": [
+        {
+          "book_id": "{{ book_id }}",
+          "chapter_id": "{{ chapter_id }}",
+          "page_start": {{ page_start }},
+          "page_end": {{ page_end }},
+          "snippet": "verbatim quote, max 600 chars"
+        }
+      ],
+      "payload": {}
+    }
+  ]
+}
+```
+
+**Quality Rules:**
+- Reject: missing subject/object (except for definition/process types)
+- Reject: evidence snippet > 600 characters
+- Set confidence < 0.65 if you are uncertain
+- For process type: use payload.steps array instead of subject/predicate/object
+
+**Text to extract from:**
+---
+{{ chunk_text }}
+---

@@ -1,0 +1,63 @@
+You are an expert content creator and video scriptwriter specializing in agricultural and natural farming topics.
+
+Generate a complete video package for the topic below using ONLY the evidence provided.
+
+## Generation Parameters
+- **Topic:** {{ topic }}
+- **Video Format:** {{ format }} — {{ format_description }}
+- **Tone:** {{ tone }} — {{ tone_description }}
+- **Audience Level:** {{ audience_level }}{% if audience_level == "beginner" %} (use simple language, relatable analogies, avoid jargon){% else %} (technical terms allowed, assume farming background){% endif %}
+- **Language Mode:** {{ language_mode }} — {{ language_description }}
+- **Scene Count:** {{ scene_min }}–{{ scene_max }} scenes
+
+## Available Evidence ({{ evidence_count }} chunks from curated books)
+{% for chunk in evidence_chunks %}
+[CHUNK-{{ loop.index0 }}] Source: "{{ chunk.book_title }}"{% if chunk.chapter_title %}, Chapter: "{{ chunk.chapter_title }}"{% endif %}, Pages {{ chunk.page_start }}–{{ chunk.page_end }} (lang: {{ chunk.language_detected }})
+{{ chunk.text[:500] }}
+---
+{% endfor %}
+
+## Citation Rules
+- EVERY scene that makes a factual claim MUST cite the relevant CHUNK indices in `evidence_chunk_indices`
+- Use 0-based indices matching [CHUNK-0], [CHUNK-1], etc. above
+- If no evidence supports a scene's claim, mark it with `"needs_citation": true`
+- Do NOT invent facts not present in the evidence
+
+## Output Format
+Return ONLY valid JSON matching this exact schema (no markdown fences, no explanation):
+
+{
+  "outline_md": "# Video Outline\n\n## Beat 1: <title>\n- <key point>\n\n## Beat 2: ...",
+  "scenes": [
+    {
+      "scene_number": 1,
+      "title": "Hook / Opening",
+      "duration_sec": 20,
+      "voiceover": "<script text in {{ language_mode }} language — 2-4 sentences>",
+      "on_screen_text": "<short bullet or headline, max 10 words>",
+      "visual_description": "<b-roll or illustration suggestion, 1 sentence>",
+      "animation_cues": ["<action 1>", "<action 2>"],
+      "evidence_chunk_indices": [0, 2],
+      "needs_citation": false
+    }
+  ],
+  "visual_spec": {
+    "diagram_suggestions": [
+      {
+        "type": "flowchart|cycle|comparison_table|process_steps|concept_map",
+        "title": "<diagram title>",
+        "description": "<what to show>",
+        "mermaid_hint": "<optional Mermaid syntax skeleton>"
+      }
+    ],
+    "icon_suggestions": ["<icon keyword 1>", "<icon keyword 2>"]
+  },
+  "warnings": ["<any notes about missing evidence, language deviations, etc.>"]
+}
+
+## Quality Requirements
+1. Voiceover text MUST be in {{ language_mode }} language.
+2. Scene count MUST be between {{ scene_min }} and {{ scene_max }}.
+3. Total voiceover length across all scenes should match the format ({{ format }}).
+4. Each scene duration_sec should be realistic (5–120 seconds).
+5. The outline_md should reflect the actual scene structure generated.

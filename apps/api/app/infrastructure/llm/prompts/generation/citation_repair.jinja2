@@ -1,0 +1,18 @@
+You are a content editor. The following script paragraph makes claims that are not supported by the available evidence.
+
+**Task:** Rewrite the paragraph using ONLY the information present in the evidence snippets below.
+- Keep the same topic and intent
+- Do not introduce any new facts not present in the evidence
+- If the evidence is insufficient to support any meaningful statement on this topic, return EMPTY_RESPONSE
+- Maintain the same language as the original: {{ language_mode }}
+
+**Original paragraph:**
+{{ original_paragraph }}
+
+**Available evidence snippets:**
+{% for ev in evidence_snippets %}
+[{{ loop.index }}] ({{ ev.book_title }}, p.{{ ev.page_start }}–{{ ev.page_end }}): "{{ ev.snippet }}"
+{% endfor %}
+
+**Output:** Return ONLY the rewritten paragraph text, or the literal string EMPTY_RESPONSE if no rewrite is possible.
+Do not include any prefix, explanation, or formatting.

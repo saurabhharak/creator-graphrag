@@ -1,0 +1,251 @@
+"""Minimal async DB helpers for the ingestion worker.
+
+Uses asyncpg directly (raw SQL) so the worker has no dependency on the
+API's SQLAlchemy ORM models. Only the fields touched by the pipeline
+need to be listed here — not the full schema.
+"""
+from __future__ import annotations
+
+import json
+import traceback as tb
+from typing import Any
+
+import asyncpg
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+
+def _pg_url(database_url: str) -> str:
+    """Strip the SQLAlchemy asyncpg dialect prefix for raw asyncpg."""
+    return database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+
+async def update_job_status(
+    database_url: str,
+    job_id: str,
+    *,
+    status: str | None = None,
+    stage: str | None = None,
+    progress: float | None = None,
+    message: str | None = None,
+    error_json: dict[str, Any] | None = None,
+    celery_task_id: str | None = None,
+) -> None:
+    """Partially update an ingestion_jobs row.
+
+    Only non-None keyword arguments are applied so callers can update
+    a single field without touching the others.
+
+    Opens a short-lived asyncpg connection per call (acceptable — called
+    ~14 times per ingestion; overhead ~5 ms/call).
+
+    Args:
+        database_url: PostgreSQL DSN from worker_settings.DATABASE_URL.
+        job_id: String UUID of the ingestion job to update.
+        status: New status (queued | running | failed | completed | canceled).
+        stage: Pipeline stage name.
+        progress: Fractional progress 0.0–1.0.
+        message: Human-readable status message.
+        error_json: Error detail dict stored as JSONB.
+        celery_task_id: Celery async result ID for cancellation.
+    """
+    set_clauses: list[str] = ["updated_at = NOW()"]
+    params: list[Any] = []
+    idx = 1
+
+    if status is not None:
+        set_clauses.append(f"status = ${idx}")
+        params.append(status)
+        idx += 1
+    if stage is not None:
+        set_clauses.append(f"stage = ${idx}")
+        params.append(stage)
+        idx += 1
+    if progress is not None:
+        set_clauses.append(f"progress = ${idx}")
+        params.append(float(progress))
+        idx += 1
+    if message is not None:
+        set_clauses.append(f"message = ${idx}")
+        params.append(message)
+        idx += 1
+    if error_json is not None:
+        set_clauses.append(f"error_json = ${idx}::jsonb")
+        params.append(json.dumps(error_json))
+        idx += 1
+    if celery_task_id is not None:
+        set_clauses.append(f"celery_task_id = ${idx}")
+        params.append(celery_task_id)
+        idx += 1
+
+    if idx == 1:
+        # Nothing to set beyond updated_at — skip the round-trip
+        return
+
+    params.append(job_id)  # WHERE job_id = $idx::uuid
+    sql = (
+        f"UPDATE ingestion_jobs SET {', '.join(set_clauses)} "
+        f"WHERE job_id = ${idx}::uuid"
+    )
+
+    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
+    try:
+        await conn.execute(sql, *params)
+        logger.debug(
+            "job_status_updated",
+            job_id=job_id,
+            status=status,
+            stage=stage,
+            progress=progress,
+        )
+    except Exception:
+        logger.error(
+            "job_status_update_failed",
+            job_id=job_id,
+            exc_info=True,
+        )
+        raise
+    finally:
+        await conn.close()
+
+
+async def insert_knowledge_units(database_url: str, units: list[dict]) -> None:
+    """Bulk INSERT knowledge_unit rows via asyncpg executemany.
+
+    Args:
+        database_url: PostgreSQL DSN from worker_settings.DATABASE_URL.
+        units: List of dicts; each must have keys matching the columns below.
+               Missing optional keys default to None.
+    """
+    if not units:
+        return
+
+    sql = """
+        INSERT INTO knowledge_units (
+            unit_id, source_book_id, source_chunk_id,
+            type, language_detected, language_confidence,
+            subject, predicate, object,
+            payload_jsonb, confidence, status,
+            evidence_jsonb, canonical_key
+        ) VALUES (
+            $1::uuid, $2::uuid, $3::uuid,
+            $4, $5, $6,
+            $7, $8, $9,
+            $10::jsonb, $11, $12,
+            $13::jsonb, $14
+        )
+        ON CONFLICT (unit_id) DO NOTHING
+    """
+
+    rows = [
+        (
+            u["unit_id"],
+            u["source_book_id"],
+            u.get("source_chunk_id"),
+            u["type"],
+            u["language_detected"],
+            u.get("language_confidence"),
+            u.get("subject"),
+            u.get("predicate"),
+            u.get("object"),
+            json.dumps(u.get("payload_jsonb", {})),
+            float(u["confidence"]),
+            u.get("status", "extracted"),
+            json.dumps(u.get("evidence_jsonb", [])),
+            u.get("canonical_key"),
+        )
+        for u in units
+    ]
+
+    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
+    try:
+        await conn.executemany(sql, rows)
+        logger.info("knowledge_units_inserted", count=len(rows))
+    except Exception:
+        logger.error("knowledge_units_insert_failed", exc_info=True)
+        raise
+    finally:
+        await conn.close()
+
+
+async def log_llm_usage(
+    database_url: str,
+    *,
+    operation_type: str,
+    model_id: str,
+    input_tokens: int,
+    output_tokens: int,
+    book_id: str | None = None,
+    job_id: str | None = None,
+) -> None:
+    """INSERT one row into llm_usage_logs for cost tracking.
+
+    Cost estimation uses gpt-4o pricing as a reference; exact values
+    depend on the model — treat as an approximation only.
+
+    Args:
+        database_url: PostgreSQL DSN from worker_settings.DATABASE_URL.
+        operation_type: "embedding" | "extraction" | "generation" | "repair".
+        model_id: Model identifier string (e.g. "gpt-4o").
+        input_tokens: Prompt token count.
+        output_tokens: Completion token count.
+        book_id: Optional book UUID string.
+        job_id: Optional ingestion job UUID string.
+    """
+    import uuid as _uuid
+
+    # gpt-4o reference pricing (USD per 1k tokens)
+    _COST_PER_1K = {"input": 0.005, "output": 0.015}
+    estimated_cost = round(
+        (input_tokens * _COST_PER_1K["input"] + output_tokens * _COST_PER_1K["output"]) / 1000,
+        6,
+    )
+
+    sql = """
+        INSERT INTO llm_usage_logs (
+            log_id, operation_type, model_id,
+            input_tokens, output_tokens, estimated_cost_usd,
+            book_id, job_id
+        ) VALUES (
+            $1::uuid, $2, $3,
+            $4, $5, $6,
+            $7::uuid, $8::uuid
+        )
+    """
+
+    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
+    try:
+        await conn.execute(
+            sql,
+            str(_uuid.uuid4()),
+            operation_type,
+            model_id,
+            input_tokens,
+            output_tokens,
+            estimated_cost,
+            book_id,
+            job_id,
+        )
+        logger.debug(
+            "llm_usage_logged",
+            op=operation_type,
+            model=model_id,
+            in_tok=input_tokens,
+            out_tok=output_tokens,
+            cost_usd=estimated_cost,
+        )
+    except Exception:
+        # Non-critical — don't fail the pipeline if cost logging fails
+        logger.warning("llm_usage_log_failed", exc_info=True)
+    finally:
+        await conn.close()
+
+
+def format_error(exc: BaseException) -> dict[str, str]:
+    """Build a compact error_json dict from an exception."""
+    return {
+        "type": type(exc).__name__,
+        "detail": str(exc)[:500],
+        "traceback": tb.format_exc()[-2000:],
+    }

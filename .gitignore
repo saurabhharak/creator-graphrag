@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment secrets
+.env
+.env.local
+.env.production
+certs/*
+!certs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Node / UI
+apps/web/node_modules/
+apps/web/dist/
+apps/web/.next/
+
+# ML Models (download separately)
+models/*
+!models/.gitkeep
+
+# Evaluation results
+eval_results/*
+!eval_results/.gitkeep
+
+# Docker volumes
+postgres-data/
+qdrant-data/
+neo4j-data/
+minio-data/
+
+# Local data — large files, never commit
+data/books/*
+!data/books/.gitkeep
+
+data/extracted/*
+!data/extracted/.gitkeep
+
+data/qdrant_storage/*
+!data/qdrant_storage/.gitkeep
+
+data/backups/*
+!data/backups/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db

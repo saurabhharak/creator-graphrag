@@ -1,0 +1,24 @@
+{
+  "$id": "https://example.com/schemas/common/PaginatedResponse.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaginatedResponse",
+  "description": "Standard pagination envelope used by all list endpoints. Uses keyset cursor pagination.",
+  "type": "object",
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "Page of results"
+    },
+    "next_cursor": {
+      "type": ["string", "null"],
+      "description": "Opaque cursor for the next page. Base64-encoded last-seen sort key. Null if no more pages."
+    },
+    "total_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Total count if available (may be null for performance reasons)"
+    }
+  },
+  "required": ["items", "next_cursor"],
+  "additionalProperties": false
+}

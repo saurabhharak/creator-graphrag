@@ -1,0 +1,35 @@
+{
+  "$id": "https://example.com/schemas/common/ErrorResponse.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ErrorResponse",
+  "description": "Standard error envelope used by all API endpoints",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Machine-readable error code",
+          "examples": ["NOT_FOUND", "VALIDATION_ERROR", "RATE_LIMIT_EXCEEDED", "FORBIDDEN"]
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error description"
+        },
+        "details": {
+          "type": ["object", "null"],
+          "description": "Additional error details (validation errors, etc.)"
+        },
+        "trace_id": {
+          "type": "string",
+          "description": "Correlation ID for log tracing"
+        }
+      },
+      "required": ["code", "message", "trace_id"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["error"],
+  "additionalProperties": false
+}

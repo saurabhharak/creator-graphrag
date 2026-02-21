@@ -1,0 +1,14 @@
+{
+  "$id": "https://example.com/schemas/auth/TokenResponse.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TokenResponse",
+  "type": "object",
+  "properties": {
+    "access_token": { "type": "string", "minLength": 1 },
+    "refresh_token": { "type": "string", "minLength": 1 },
+    "token_type": { "type": "string", "enum": ["Bearer"] },
+    "expires_in": { "type": "integer", "minimum": 1, "description": "Seconds until access_token expires" }
+  },
+  "required": ["access_token", "refresh_token", "token_type", "expires_in"],
+  "additionalProperties": false
+}

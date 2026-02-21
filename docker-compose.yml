@@ -1,0 +1,203 @@
+version: "3.9"
+
+services:
+  # ─────────────────────────────────────────────
+  # FastAPI Service
+  # ─────────────────────────────────────────────
+  api:
+    build:
+      context: apps/api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      - APP_ENV=development
+    volumes:
+      - ./apps/api:/app
+      - ./libs:/libs
+      - ./certs:/app/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # Celery Worker
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: apps/worker
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      - APP_ENV=development
+    volumes:
+      - ./apps/worker:/app
+      - ./libs:/libs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    command: celery -A app.worker worker --loglevel=info -Q default,ocr,embed,graph -c 4
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # Celery Beat (Scheduler)
+  # ─────────────────────────────────────────────
+  celery-beat:
+    build:
+      context: apps/worker
+      dockerfile: Dockerfile
+    env_file: .env
+    depends_on:
+      - redis
+    command: celery -A app.worker beat --loglevel=info
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: creator_graphrag
+      POSTGRES_USER: cgr_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_dev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cgr_user -d creator_graphrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # Redis
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # Qdrant (Vector DB)
+  # ─────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # Neo4j (Graph DB)
+  # ─────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.18-enterprise
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme_dev}
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:7474/browser/"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # MinIO (S3-compatible storage)
+  # ─────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-changeme_dev}
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
+  # OpenTelemetry Collector (optional)
+  # ─────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.98.0
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otel/config.yaml
+    command: ["--config=/etc/otel/config.yaml"]
+    profiles:
+      - observability
+    networks:
+      - cgr-net
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  neo4j-data:
+  neo4j-logs:
+  minio-data:
+
+networks:
+  cgr-net:
+    driver: bridge

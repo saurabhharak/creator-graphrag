@@ -25,7 +25,7 @@ builds a Knowledge Graph + Vector Store, and generates citation-enforced video p
 apps/
   api/          FastAPI service — REST API, auth, book management, search
   worker/       Celery workers — ingestion pipeline (chunk → embed → upsert)
-  web/          React + TypeScript UI (Creator Studio) — not started
+  web/          React + TypeScript UI (Creator Studio) — Vite + React 19, port 3000
 
 libs/
   shared/       Contracts, types, validators
@@ -248,6 +248,55 @@ Transient failures (ConnectionError, TimeoutError, OSError) are retried up to 3�
 
 ---
 
+## Running the Frontend (local dev)
+
+The Creator Studio UI is a **React 19 + TypeScript** single-page app built with **Vite**.
+
+### Prerequisites
+
+- **Node.js ≥ 18** (LTS recommended) — [nodejs.org](https://nodejs.org)
+- The **backend API** must be running on `http://localhost:8000` (see *Running the API* above).
+  Vite proxies all `/v1/*` requests to the API automatically, so no CORS setup is needed.
+
+### Install dependencies
+
+```bash
+cd apps/web
+npm install
+```
+
+### Start the dev server
+
+```bash
+npm run dev
+# → Local: http://localhost:3000
+```
+
+The app hot-reloads on every file save. API calls to `/v1/...` are transparently
+proxied to `http://localhost:8000` via the Vite config.
+
+### Other frontend commands
+
+| Command | Purpose |
+|---------|--------|
+| `npm run dev` | Start Vite dev server (port 3000, HMR enabled) |
+| `npm run build` | Production bundle → `apps/web/dist/` |
+| `npm run preview` | Preview the production build locally |
+| `npm run lint` | ESLint check |
+
+### Frontend tech
+
+| Library | Version | Purpose |
+|---------|---------|--------|
+| React | 19 | UI framework |
+| React Router | 6 | Client-side routing |
+| TanStack Query | 5 | Server-state / data fetching |
+| Zustand | 5 | Client-side state management |
+| Lucide React | latest | Icon set |
+| React Hot Toast | 2 | Notifications |
+
+---
+
 ## Search API
 
 ```bash
@@ -294,6 +343,8 @@ Only S3 HEAD calls (`object_exists`, `get_object_size`) are mocked inline.
 
 ## Development Commands
 
+### Backend (Make)
+
 ```bash
 make help             # list all commands
 make docker-up        # start all docker services
@@ -310,6 +361,17 @@ make test-unit        # unit tests only
 make test-integration # integration tests (needs live services)
 make eval             # golden query evaluation
 make clean            # remove __pycache__ and .pyc files
+```
+
+### Frontend (npm)
+
+```bash
+cd apps/web
+npm install      # install dependencies (first time)
+npm run dev      # start dev server → http://localhost:3000
+npm run build    # production bundle → apps/web/dist/
+npm run preview  # preview production build
+npm run lint     # ESLint
 ```
 
 ---

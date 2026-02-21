@@ -306,11 +306,44 @@ async def get_book(book_id: UUID, user: CurrentUserDep, db: DbSession):
     )
 
 
+class UpdateBookRequest(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=400)
+    author: str | None = Field(None, max_length=300)
+    year: int | None = Field(None, ge=1400, le=2100)
+    edition: str | None = Field(None, max_length=100)
+    language_primary: str | None = Field(None, pattern="^(mr|hi|en|mixed|unknown)$")
+    publisher: str | None = Field(None, max_length=300)
+    isbn: str | None = Field(None, max_length=40)
+    tags: list[str] | None = None
+
+
 @router.patch("/{book_id}", summary="Update book metadata")
-async def update_book(book_id: UUID, user: EditorOrAdminDep):
+async def update_book(
+    book_id: UUID,
+    body: UpdateBookRequest,
+    user: EditorOrAdminDep,
+    db: DbSession,
+):
     """Update editable book metadata. Requires owner or admin role."""
-    # TODO(#1): verify ownership, update, log to audit_log
-    raise NotImplementedError
+    book_repo = BookRepository(db)
+    book = await book_repo.get_by_id(book_id)
+    if book is None or (book.created_by != user.user_id and user.role != "admin"):
+        raise NotFoundError(f"Book {book_id} not found")
+
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not patch:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update.",
+        )
+
+    for field, value in patch.items():
+        setattr(book, field, value)
+    book.updated_at = datetime.now(timezone.utc)
+
+    await db.flush()
+    logger.info("book_updated", book_id=str(book_id), fields=list(patch.keys()))
+    return {"book_id": str(book_id), "updated_fields": list(patch.keys())}
 
 
 @router.delete("/{book_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete book")
@@ -334,8 +367,28 @@ async def list_chapters(book_id: UUID, user: CurrentUserDep, db: DbSession):
     if book is None or book.created_by != user.user_id:
         raise NotFoundError(f"Book {book_id} not found")
 
-    # TODO(#1): fetch chapters from DB after ingestion worker populates them
-    return {"book_id": str(book_id), "chapters": []}
+    from sqlalchemy import select as sa_select
+    from app.infrastructure.db.models.books import Chapter
+
+    result = await db.execute(
+        sa_select(Chapter)
+        .where(Chapter.book_id == book_id, Chapter.deleted_at.is_(None))
+        .order_by(Chapter.sort_order)
+    )
+    chapters = result.scalars().all()
+    return {
+        "book_id": str(book_id),
+        "chapters": [
+            {
+                "chapter_id": str(ch.chapter_id),
+                "title": ch.title,
+                "page_start": ch.page_start,
+                "page_end": ch.page_end,
+                "sort_order": ch.sort_order,
+            }
+            for ch in chapters
+        ],
+    }
 
 
 @router.get("/{book_id}/chunks", summary="List book chunks")
@@ -358,8 +411,48 @@ async def list_chunks(
     if book is None or book.created_by != user.user_id:
         raise NotFoundError(f"Book {book_id} not found")
 
-    # TODO(#1): fetch chunks from DB with filters after ingestion worker populates them
-    return {"book_id": str(book_id), "chunks": [], "next_cursor": None}
+    from sqlalchemy import select as sa_select
+    from app.infrastructure.db.models.books import Chunk
+
+    conditions = [Chunk.book_id == book_id, Chunk.deleted_at.is_(None)]
+    if chunk_type:
+        conditions.append(Chunk.chunk_type == chunk_type)
+    if language:
+        conditions.append(Chunk.language_detected == language)
+    if cursor:
+        try:
+            cursor_dt = datetime.fromisoformat(cursor)
+            conditions.append(Chunk.created_at < cursor_dt)
+        except ValueError:
+            pass
+
+    result = await db.execute(
+        sa_select(Chunk)
+        .where(*conditions)
+        .order_by(Chunk.created_at.desc())
+        .limit(limit + 1)
+    )
+    chunks = list(result.scalars().all())
+    has_more = len(chunks) > limit
+    items = chunks[:limit]
+    next_c = items[-1].created_at.isoformat() if has_more and items else None
+
+    return {
+        "book_id": str(book_id),
+        "chunks": [
+            {
+                "chunk_id": str(c.chunk_id),
+                "chunk_type": c.chunk_type,
+                "language_detected": c.language_detected,
+                "page_start": c.page_start,
+                "page_end": c.page_end,
+                "section_title": c.section_title,
+                "text_preview": (c.text[:300] if c.text else None),
+            }
+            for c in items
+        ],
+        "next_cursor": next_c,
+    }
 
 
 @router.get("/{book_id}/jobs", summary="List ingestion jobs for book")

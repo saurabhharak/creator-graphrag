@@ -92,7 +92,14 @@ async def cancel_job(job_id: UUID, user: EditorOrAdminDep, db: DbSession):
     if job is None or (job.created_by != user.user_id and user.role != "admin"):
         raise NotFoundError(f"Job {job_id} not found")
 
-    # TODO(#1): revoke Celery task via job.celery_task_id
+    # Revoke Celery task if it has one
+    if job.celery_task_id:
+        try:
+            from app.infrastructure.celery_client import _sender
+            _sender().control.revoke(job.celery_task_id, terminate=True)
+        except Exception as exc:
+            logger.warning("celery_revoke_failed", job_id=str(job_id), error=str(exc))
+
     await job_repo.update_status(job_id, status="canceled", message="Canceled by user")
     return {"job_id": str(job_id), "status": "canceled"}
 
@@ -121,7 +128,17 @@ async def retry_job(job_id: UUID, user: EditorOrAdminDep, db: DbSession):
         config_json=job.config_json,
     )
 
-    # TODO(#1): enqueue Celery task for new_job.job_id
+    # Enqueue Celery task for the new job
+    try:
+        from app.infrastructure.celery_client import enqueue_ingestion
+        celery_task_id = enqueue_ingestion(
+            job_id=str(new_job.job_id),
+            book_id=str(job.book_id),
+            config=job.config_json or {},
+        )
+        await job_repo.update_status(new_job.job_id, celery_task_id=celery_task_id)
+    except Exception as exc:
+        logger.error("celery_retry_enqueue_failed", job_id=str(new_job.job_id), error=str(exc))
 
     logger.info(
         "ingestion_job_retried",

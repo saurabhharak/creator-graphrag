@@ -1,6 +1,8 @@
 """Health, readiness, and liveness endpoints (no auth required)."""
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
@@ -66,11 +68,23 @@ async def readiness(db: DbSession, redis: RedisClient):
         services.redis = "error"
         all_healthy = False
 
-    # TODO(#0): inject Qdrant client and verify collection exists
-    services.qdrant = "unknown"
+    # Check Qdrant
+    try:
+        from app.infrastructure.vector.qdrant import _client as qdrant_client
+        info = await asyncio.to_thread(lambda: qdrant_client().get_collections())
+        services.qdrant = "ok"
+    except Exception as exc:
+        logger.warning("health_check_qdrant_failed", error=str(exc))
+        services.qdrant = "error"
 
-    # TODO(#0): inject Neo4j driver and run RETURN 1
-    services.neo4j = "unknown"
+    # Check Neo4j
+    try:
+        from app.infrastructure.graph import neo4j_client
+        reachable = await neo4j_client.is_reachable()
+        services.neo4j = "ok" if reachable else "error"
+    except Exception as exc:
+        logger.warning("health_check_neo4j_failed", error=str(exc))
+        services.neo4j = "error"
 
     response_status = "ok" if all_healthy else "degraded"
     http_status = status.HTTP_200_OK if all_healthy else status.HTTP_503_SERVICE_UNAVAILABLE

@@ -1,14 +1,22 @@
 """Application configuration loaded from environment variables."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve project root: config.py → core → app → api → apps → PROJECT_ROOT
+ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(ROOT_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # App
     APP_ENV: Literal["development", "staging", "production"] = "development"
@@ -73,10 +81,13 @@ class Settings(BaseSettings):
     LLM_REPAIR_MODEL: str = "gpt-4o-mini"
 
     # Embeddings
+    EMBEDDING_PROVIDER: Literal["ollama", "huggingface"] = "ollama"
     EMBEDDING_MODEL: Literal["bge-m3", "text-embedding-3-large", "qwen3-embedding:8b"] = "qwen3-embedding:8b"
     EMBEDDING_DIMENSION: int = 4096
     OLLAMA_ENDPOINT: str = "http://localhost:11434"
     BGE_M3_ENDPOINT: str | None = None
+    HF_TOKEN: str | None = None
+    HF_EMBEDDING_URL: str = "https://router.huggingface.co/scaleway/v1/embeddings"
 
     # OCR
     OCR_ENGINE: Literal["tesseract", "azure_vision", "sarvam"] = "tesseract"
@@ -128,6 +139,14 @@ class Settings(BaseSettings):
     CITATION_REPAIR_MODE: Literal[
         "remove_paragraph", "label_interpretation", "fail_generation"
     ] = "label_interpretation"
+
+    @field_validator("JWT_PRIVATE_KEY_PATH", "JWT_PUBLIC_KEY_PATH", "FASTTEXT_MODEL_PATH", mode="before")
+    @classmethod
+    def resolve_paths(cls, v: str) -> str:
+        """Convert relative paths to absolute paths anchored at project root."""
+        if v and not Path(v).is_absolute():
+            return str(ROOT_DIR / v)
+        return v
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

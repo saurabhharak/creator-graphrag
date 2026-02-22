@@ -35,6 +35,21 @@ services:
       - cgr-net
 
   # ─────────────────────────────────────────────
+  # Frontend (React + Vite → nginx)
+  # ─────────────────────────────────────────────
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - cgr-net
+
+  # ─────────────────────────────────────────────
   # Celery Worker
   # ─────────────────────────────────────────────
   worker:
@@ -114,14 +129,14 @@ services:
   # Qdrant (Vector DB)
   # ─────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.9.0
+    image: qdrant/qdrant:v1.16.3
     ports:
       - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:6333/healthz"]
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/localhost/6333' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

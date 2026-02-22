@@ -1,0 +1,4 @@
+﻿{
+    "input":  "hello world",
+    "model":  "qwen3-embedding-8b"
+}

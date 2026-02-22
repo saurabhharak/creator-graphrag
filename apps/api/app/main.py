@@ -32,11 +32,13 @@ from app.core.logging import configure_logging
 
 logger = structlog.get_logger(__name__)
 
+# Configure logging EARLY — before any DB/Neo4j imports trigger queries
+configure_logging()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown of infrastructure connections."""
-    configure_logging()
 
     # Verify DB connectivity on startup (non-fatal: app starts even if DB is temporarily down)
     from sqlalchemy import text as _text

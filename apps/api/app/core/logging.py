@@ -1,4 +1,9 @@
-"""Structured logging configuration using structlog."""
+"""Structured logging configuration using structlog.
+
+Production-grade setup:
+  - development : human-readable console output, SQL echo allowed
+  - staging/prod: JSON lines, no SQL echo, PII-safe, log-aggregator friendly
+"""
 from __future__ import annotations
 
 import logging
@@ -10,12 +15,19 @@ from app.core.config import settings
 
 
 def configure_logging() -> None:
-    """Configure structlog for JSON output with correlation IDs."""
+    """Configure structlog for structured output with correlation IDs.
+
+    Controls:
+      - APP_ENV=development → pretty console renderer
+      - APP_ENV=staging|production → JSON lines (for ELK, CloudWatch, etc.)
+      - LOG_LEVEL → root log level (default INFO)
+      - DEBUG=true → only enables SQLAlchemy echo in development mode
+    """
     shared_processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
-        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
     ]
@@ -24,7 +36,7 @@ def configure_logging() -> None:
         # Human-readable in dev
         renderer = structlog.dev.ConsoleRenderer()
     else:
-        # JSON in staging/prod
+        # JSON in staging/prod — machine-parseable for log aggregators
         renderer = structlog.processors.JSONRenderer()
 
     structlog.configure(
@@ -51,6 +63,24 @@ def configure_logging() -> None:
     root_logger = logging.getLogger()
     root_logger.handlers = [handler]
     root_logger.setLevel(settings.LOG_LEVEL.upper())
+
+    # ── Silence noisy loggers ────────────────────────────────────────────
+    # SQLAlchemy engine logs — only show DEBUG if explicitly requested via SQL_ECHO env var
+    # Default: WARNING only (connection errors, pool exhaustion)
+    import os
+    sql_echo = os.getenv("SQL_ECHO", "false").lower() in ("true", "1", "yes")
+    logging.getLogger("sqlalchemy.engine").setLevel(
+        logging.DEBUG if sql_echo else logging.WARNING
+    )
+
+    # Neo4j driver notifications — suppress verbose property-missing warnings
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
+    logging.getLogger("neo4j").setLevel(logging.WARNING)
+
+    # Uvicorn access logs — keep clean, only errors
+    logging.getLogger("uvicorn.access").setLevel(
+        logging.INFO if settings.APP_ENV == "development" else logging.WARNING
+    )
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

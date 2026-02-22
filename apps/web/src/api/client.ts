@@ -31,7 +31,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   });
 
   if (res.status === 401) {
-    // Try refresh once
+    // Try refresh once — all concurrent 401s share the same refresh promise
     const refreshed = await tryRefreshToken();
     if (refreshed) {
       return request<T>(path, opts);
@@ -51,7 +51,22 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   return res.json();
 }
 
+// Singleton refresh lock — prevents multiple concurrent refresh attempts
+let refreshPromise: Promise<boolean> | null = null;
+
 async function tryRefreshToken(): Promise<boolean> {
+  // If a refresh is already in progress, wait for that one instead of starting another
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = doRefresh();
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
+async function doRefresh(): Promise<boolean> {
   const refreshToken = localStorage.getItem('refresh_token');
   if (!refreshToken) return false;
 
@@ -229,7 +244,7 @@ export const videoApi = {
   },
 
   generate: (data: { topic: string; format: string; audience_level: string; language_mode: string }) =>
-    request<unknown>('/video-packages', { method: 'POST', body: data }),
+    request<unknown>('/video-packages:generate', { method: 'POST', body: { ...data, tone: 'teacher' } }),
 };
 
 // ── Health ────────────────────────────────────────────────────────────────────

@@ -1,42 +1,68 @@
-You are an expert content creator and video scriptwriter specializing in agricultural and natural farming topics.
+Create a complete video package for the topic below.
 
-Generate a complete video package for the topic below using ONLY the evidence provided.
+## Topic
+{{ topic }}
 
-## Generation Parameters
-- **Topic:** {{ topic }}
-- **Video Format:** {{ format }} — {{ format_description }}
+## Creative Brief
+- **Format:** {{ format }} — {{ format_description }}
 - **Tone:** {{ tone }} — {{ tone_description }}
-- **Audience Level:** {{ audience_level }}{% if audience_level == "beginner" %} (use simple language, relatable analogies, avoid jargon){% else %} (technical terms allowed, assume farming background){% endif %}
-- **Language Mode:** {{ language_mode }} — {{ language_description }}
-- **Scene Count:** {{ scene_min }}–{{ scene_max }} scenes
+- **Audience:** {{ audience_level }}{% if audience_level == "beginner" %} — assume zero background knowledge, use everyday language, relatable analogies from daily life{% elif audience_level == "intermediate" %} — viewer has basic knowledge, use technical terms but explain advanced concepts{% else %} — expert audience, technical language welcome{% endif %}
+- **Language:** {{ language_mode }} — {{ language_description }}
+- **Scene Count:** {{ scene_min }}–{{ scene_max }}
 
-## Available Evidence ({{ evidence_count }} chunks from curated books)
+## Source Material ({{ evidence_count }} evidence chunks)
+
+Use these as your FACTUAL BACKBONE. Extract specific numbers, examples, place names, and processes from them. Do NOT copy sentences — rewrite everything in your own voice.
+
 {% for chunk in evidence_chunks %}
-[CHUNK-{{ loop.index0 }}] Source: "{{ chunk.book_title }}"{% if chunk.chapter_title %}, Chapter: "{{ chunk.chapter_title }}"{% endif %}, Pages {{ chunk.page_start }}–{{ chunk.page_end }} (lang: {{ chunk.language_detected }})
-{{ chunk.text[:500] }}
+[CHUNK-{{ loop.index0 }}]{% if chunk.book_title %} Source: "{{ chunk.book_title }}"{% endif %}{% if chunk.chapter_title %}, Ch: "{{ chunk.chapter_title }}"{% endif %}, Pages {{ chunk.page_start }}–{{ chunk.page_end }} ({{ chunk.language_detected }})
+{{ chunk.text }}
 ---
 {% endfor %}
 
 ## Citation Rules
-- EVERY scene that makes a factual claim MUST cite the relevant CHUNK indices in `evidence_chunk_indices`
-- Use 0-based indices matching [CHUNK-0], [CHUNK-1], etc. above
-- If no evidence supports a scene's claim, mark it with `"needs_citation": true`
-- Do NOT invent facts not present in the evidence
+- Every scene making a factual claim MUST list the CHUNK indices used in `evidence_chunk_indices` (0-based: [CHUNK-0] = index 0)
+- If a scene is opinion/interpretation/CTA with no evidence, set `"needs_citation": true` and leave `evidence_chunk_indices` empty
+- NEVER invent facts, statistics, or examples not present in the evidence
 
-## Output Format
-Return ONLY valid JSON matching this exact schema (no markdown fences, no explanation):
+## Content Quality Rules
+
+### Hook
+- The FIRST scene must stop the scroll. Open with a surprising number, a bold claim, a provocative question, or a vivid image. NEVER open with "In today's video" or "Hello friends."
+
+### Voice
+- Write voiceover as SPOKEN language. Short sentences. Fragments are fine. Contractions are mandatory ("it's" not "it is", "don't" not "do not").
+- Read your voiceover out loud mentally — if it sounds like a textbook, rewrite it.
+- Use "you" and "your" to talk directly to the viewer.
+
+### Specificity
+- EXTRACT specific numbers from the evidence: costs, percentages, dimensions, time periods, place names.
+- Not "saves money" → "costs ₹2/kg to make vs ₹40/kg to buy"
+- Not "many farmers" → "over 4,000 farmers in Wardha district"
+- Not "improves soil" → "increases water retention by 30%"
+
+### Pacing
+- Each scene's voiceover word count should match its duration at ~150 words/minute.
+- Every 45-60 seconds, insert a "re-hook" — a question, a surprise, a shift in energy.
+
+### Transitions
+- No "Moving on..." or "Next, let's talk about..." 
+- Use: "But here's the part nobody talks about..." / "Now you might be wondering..." / "And this is where it gets wild..."
+
+## Output Schema
+Return ONLY valid JSON (no markdown fences, no explanation):
 
 {
   "outline_md": "# Video Outline\n\n## Beat 1: <title>\n- <key point>\n\n## Beat 2: ...",
   "scenes": [
     {
       "scene_number": 1,
-      "title": "Hook / Opening",
-      "duration_sec": 20,
-      "voiceover": "<script text in {{ language_mode }} language — 2-4 sentences>",
-      "on_screen_text": "<short bullet or headline, max 10 words>",
-      "visual_description": "<b-roll or illustration suggestion, 1 sentence>",
-      "animation_cues": ["<action 1>", "<action 2>"],
+      "title": "<scene title>",
+      "duration_sec": <seconds>,
+      "voiceover": "<FULL script text in {{ language_mode }} — this is EXACTLY what the narrator says>",
+      "on_screen_text": "<short headline or key stat, max 8 words>",
+      "visual_description": "<specific b-roll, illustration, or animation description — be detailed enough for a video editor to act on>",
+      "animation_cues": ["<motion/transition 1>", "<motion/transition 2>"],
       "evidence_chunk_indices": [0, 2],
       "needs_citation": false
     }
@@ -44,20 +70,13 @@ Return ONLY valid JSON matching this exact schema (no markdown fences, no explan
   "visual_spec": {
     "diagram_suggestions": [
       {
-        "type": "flowchart|cycle|comparison_table|process_steps|concept_map",
+        "type": "flowchart|cycle|comparison_table|process_steps|concept_map|before_after",
         "title": "<diagram title>",
-        "description": "<what to show>",
-        "mermaid_hint": "<optional Mermaid syntax skeleton>"
+        "description": "<what to show — be specific>",
+        "mermaid_hint": "<optional Mermaid.js syntax>"
       }
     ],
-    "icon_suggestions": ["<icon keyword 1>", "<icon keyword 2>"]
+    "icon_suggestions": ["<icon keyword>"]
   },
-  "warnings": ["<any notes about missing evidence, language deviations, etc.>"]
+  "warnings": ["<any notes about evidence gaps, language deviations, etc.>"]
 }
-
-## Quality Requirements
-1. Voiceover text MUST be in {{ language_mode }} language.
-2. Scene count MUST be between {{ scene_min }} and {{ scene_max }}.
-3. Total voiceover length across all scenes should match the format ({{ format }}).
-4. Each scene duration_sec should be realistic (5–120 seconds).
-5. The outline_md should reflect the actual scene structure generated.

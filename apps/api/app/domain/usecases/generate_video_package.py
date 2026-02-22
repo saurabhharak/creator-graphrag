@@ -76,11 +76,27 @@ LANGUAGE_DESCRIPTIONS = {
 }
 
 _PROMPTS_DIR = Path(__file__).parent.parent.parent / "infrastructure" / "llm" / "prompts" / "generation"
+_SYSTEM_PROMPTS_DIR = _PROMPTS_DIR / "system"
 _jinja_env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(_PROMPTS_DIR)),
     autoescape=False,
     undefined=jinja2.StrictUndefined,
 )
+
+_DEFAULT_SYSTEM_PROMPT = (
+    "You are a top-tier YouTube scriptwriter who creates engaging, non-robotic "
+    "video scripts. Write as spoken language — conversational, vivid, hook-driven. "
+    "You MUST return valid JSON only. No markdown, no explanation outside JSON."
+)
+
+
+def _load_system_prompt(format: str) -> str:
+    """Load format-specific system prompt from prompts/generation/system/{format}.md."""
+    prompt_file = _SYSTEM_PROMPTS_DIR / f"{format}.md"
+    if prompt_file.exists():
+        return prompt_file.read_text(encoding="utf-8").strip()
+    logger.warning("system_prompt_not_found", format=format, path=str(prompt_file))
+    return _DEFAULT_SYSTEM_PROMPT
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -92,7 +108,15 @@ def _sanitize_topic(topic: str) -> str:
 
 
 async def _embed_query(query: str) -> list[float]:
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    """Embed a query string. Uses EMBEDDING_PROVIDER setting (ollama or huggingface)."""
+    if settings.EMBEDDING_PROVIDER == "huggingface":
+        return await _embed_via_huggingface(query)
+    return await _embed_via_ollama(query)
+
+
+async def _embed_via_ollama(query: str) -> list[float]:
+    """Embed via local Ollama instance."""
+    async with httpx.AsyncClient(timeout=180.0) as client:
         try:
             resp = await client.post(
                 f"{settings.OLLAMA_ENDPOINT}/api/embeddings",
@@ -100,10 +124,55 @@ async def _embed_query(query: str) -> list[float]:
             )
             resp.raise_for_status()
             return resp.json()["embedding"]
+        except httpx.TimeoutException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"Ollama timed out (model may be loading): {exc}",
+            )
         except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Embedding service unavailable: {exc}",
+                detail=f"Ollama unavailable: {exc}",
+            )
+
+
+async def _embed_via_huggingface(query: str) -> list[float]:
+    """Embed via HuggingFace Inference API (Scaleway endpoint)."""
+    if not settings.HF_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="HF_TOKEN not configured. Set HF_TOKEN in .env to use HuggingFace embeddings.",
+        )
+    # Convert Ollama model name to HF format: "qwen3-embedding:8b" → "qwen3-embedding-8b"
+    hf_model = settings.EMBEDDING_MODEL.replace(":", "-")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.post(
+                settings.HF_EMBEDDING_URL,
+                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
+                json={"input": query, "model": hf_model},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # HF returns {"data": [{"embedding": [...]}]} (OpenAI-compatible)
+            if isinstance(data, dict) and "data" in data:
+                return data["data"][0]["embedding"]
+            # Or direct list format
+            if isinstance(data, list) and len(data) > 0:
+                return data[0] if isinstance(data[0], list) else data
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Unexpected HF embedding response format: {str(data)[:200]}",
+            )
+        except httpx.TimeoutException as exc:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=f"HuggingFace embedding timed out: {exc}",
+            )
+        except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"HuggingFace embedding error: {exc}",
             )
 
 
@@ -302,10 +371,7 @@ class GenerateVideoPackageUsecase:
             evidence_count=len(evidence_for_prompt),
         )
 
-        system_prompt = (
-            "You are a video script generator for agricultural education content. "
-            "You MUST return valid JSON only. No markdown, no explanation outside JSON."
-        )
+        system_prompt = _load_system_prompt(format)
 
         try:
             llm_resp = await call_llm(
@@ -314,7 +380,7 @@ class GenerateVideoPackageUsecase:
                 model=settings.LLM_GENERATION_MODEL,
                 api_key=settings.OPENAI_API_KEY,
                 base_url=settings.OPENAI_BASE_URL,
-                temperature=0.3,
+                temperature=0.7,
                 max_tokens=8000,
             )
         except openai.AuthenticationError as exc:

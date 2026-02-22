@@ -16,7 +16,7 @@ engine = create_async_engine(
     pool_timeout=5,
     pool_recycle=1800,
     pool_pre_ping=True,
-    echo=settings.DEBUG,
+    echo=False,  # SQL logging controlled via logging.getLogger("sqlalchemy.engine") level
 )
 
 async_session_factory = async_sessionmaker(

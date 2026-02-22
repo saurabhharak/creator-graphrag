@@ -274,9 +274,11 @@ def _apply_needs_citation_policy(
             )
         elif mode == CitationRepairMode.LABEL_INTERPRETATION:
             scene = dict(scene)
-            scene["voiceover"] = f"[Interpretation] {scene.get('voiceover', '')}"
+            # Flag the scene as interpretation — do NOT pollute the voiceover
+            # text since that's the actual narration script read aloud.
+            scene["is_interpretation"] = True
             warnings.append(
-                f"scene:{scene['scene_number']} labeled [Interpretation] — no evidence"
+                f"scene:{scene['scene_number']} is interpretation — no evidence"
             )
             result.append(scene)
         elif mode == CitationRepairMode.FAIL_GENERATION:

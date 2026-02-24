@@ -160,7 +160,7 @@ async def list_books(
                 language_primary=book.language_primary,
                 tags=book.tags or [],
                 ingestion_status=latest_job.status if latest_job else None,
-                chunk_count=0,  # populated post-ingestion
+                chunk_count=(latest_job.metrics_json or {}).get("chunks_created", 0) if latest_job else 0,
                 unit_approval_rate=None,  # populated post-extraction
                 created_at=book.created_at.isoformat(),
                 updated_at=book.updated_at.isoformat(),

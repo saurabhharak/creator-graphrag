@@ -13,6 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.api.v1.routers import (
+    analytics,
     api_keys,
     auth,
     books,
@@ -151,3 +152,4 @@ app.include_router(evidence.router, prefix="/v1/evidence", tags=["evidence"])
 app.include_router(graph.router, prefix="/v1/graph", tags=["graph"])
 app.include_router(templates.router, prefix="/v1/templates", tags=["templates"])
 app.include_router(webhooks.router, prefix="/v1/webhooks", tags=["webhooks"])
+app.include_router(analytics.router, prefix="/v1/analytics", tags=["analytics"])

@@ -1,11 +1,15 @@
 """Video package generation and management endpoints (EPIC 7)."""
 from __future__ import annotations
 
+import io
+import json
+import zipfile
 from datetime import datetime
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.v1.deps import CurrentUserDep, DbSession, EditorOrAdminDep
@@ -252,9 +256,41 @@ async def export_video_package(
     if format == "json":
         return _pkg_full(pkg)
 
+    if format == "zip":
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            full = _pkg_full(pkg)
+            zf.writestr("package.json", json.dumps(full, ensure_ascii=False, indent=2))
+            zf.writestr("outline.md", pkg.outline_md or "")
+            zf.writestr("script.md", pkg.script_md or "")
+            zf.writestr(
+                "storyboard.json",
+                json.dumps(pkg.storyboard_jsonb, ensure_ascii=False, indent=2),
+            )
+            zf.writestr(
+                "visual_spec.json",
+                json.dumps(pkg.visual_spec_jsonb, ensure_ascii=False, indent=2),
+            )
+            zf.writestr(
+                "citations.json",
+                json.dumps(pkg.citations_report_jsonb, ensure_ascii=False, indent=2),
+            )
+            zf.writestr(
+                "evidence_map.json",
+                json.dumps(pkg.evidence_map_jsonb, ensure_ascii=False, indent=2),
+            )
+        buf.seek(0)
+        slug = pkg.topic[:40].replace(" ", "_").replace("/", "-")
+        filename = f"video_package_{slug}_v{pkg.version}.zip"
+        return Response(
+            content=buf.read(),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=f"Async export format '{format}' is not yet implemented.",
+        detail=f"Export format '{format}' is not yet implemented.",
     )
 
 

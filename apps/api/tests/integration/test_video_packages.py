@@ -309,14 +309,23 @@ class TestExportVideoPackage:
         assert body["video_id"] == vid
         assert "script_md" in body
 
-    async def test_export_zip_not_implemented(self, client, vp_context):
+    async def test_export_zip_returns_archive(self, client, vp_context):
         vid = vp_context["video_id"]
         r = await client.get(
             f"/v1/video-packages/{vid}/export",
             params={"format": "zip"},
             headers=vp_context["headers"],
         )
-        assert r.status_code == 501
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/zip"
+        assert "attachment" in r.headers.get("content-disposition", "")
+        # Verify it is a valid ZIP
+        import io, zipfile
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = zf.namelist()
+        assert "package.json" in names
+        assert "script.md" in names
+        assert "storyboard.json" in names
 
 
 class TestDeleteVideoPackage:

@@ -109,6 +109,19 @@ async def update_job_status(
     finally:
         await conn.close()
 
+    # Publish to Redis pub/sub for SSE streaming (non-blocking, non-critical)
+    try:
+        from app.core.config import worker_settings as _ws
+        await publish_job_event(
+            _ws.REDIS_URL,
+            job_id,
+            stage=stage,
+            status=status,
+            progress=progress,
+        )
+    except Exception:
+        pass
+
 
 async def insert_knowledge_units(database_url: str, units: list[dict]) -> None:
     """Bulk INSERT knowledge_unit rows via asyncpg executemany.
@@ -240,6 +253,39 @@ async def log_llm_usage(
         logger.warning("llm_usage_log_failed", exc_info=True)
     finally:
         await conn.close()
+
+
+async def publish_job_event(
+    redis_url: str,
+    job_id: str,
+    *,
+    stage: str | None = None,
+    status: str | None = None,
+    progress: float | None = None,
+) -> None:
+    """Publish a job progress event to Redis pub/sub for SSE streaming.
+
+    Non-critical — silently swallows errors so the pipeline is never blocked
+    by a Redis connectivity issue.
+    """
+    try:
+        import redis.asyncio as _aioredis
+
+        payload = json.dumps({
+            k: v for k, v in {
+                "job_id": job_id,
+                "stage": stage,
+                "status": status,
+                "progress": progress,
+            }.items() if v is not None
+        })
+        client = _aioredis.from_url(redis_url, decode_responses=True)
+        try:
+            await client.publish(f"job:{job_id}:events", payload)
+        finally:
+            await client.aclose()
+    except Exception:
+        logger.warning("redis_publish_failed", job_id=job_id)
 
 
 def format_error(exc: BaseException) -> dict[str, str]:

@@ -228,23 +228,138 @@ export interface SearchResult {
 }
 
 export const searchApi = {
-  search: (query: string, topK = 10, graphEnable = false) =>
+  search: (query: string, topK = 10, graphEnable = false, filters?: {
+    book_ids?: string[];
+    chunk_types?: string[];
+    languages?: string[];
+    page_min?: number;
+    page_max?: number;
+  }) =>
     request<{ query: string; total: number; results: SearchResult[]; graph_plan: unknown }>('/search', {
       method: 'POST',
-      body: { query, top_k: topK, graph: { enable: graphEnable, max_hops: 2 } },
+      body: {
+        query,
+        top_k: topK,
+        filters: filters || {},
+        graph: { enable: graphEnable, max_hops: 2 },
+      },
     }),
 };
 
 // ── Video Packages ────────────────────────────────────────────────────────────
+export interface VideoPackage {
+  video_id: string;
+  topic: string;
+  format: string;
+  audience_level: string;
+  language_mode: string;
+  tone: string;
+  version: number;
+  citation_coverage: number | null;
+  scene_count: number;
+  created_at: string;
+}
+
+export interface VideoPackageFull extends VideoPackage {
+  outline_md: string;
+  script_md: string;
+  storyboard: {
+    scenes: Array<{
+      scene_number: number;
+      title: string;
+      duration_sec: number;
+      voiceover: string;
+      on_screen_text: string;
+      visual_description: string;
+      animation_cues: string[];
+      evidence_chunk_indices: number[];
+      needs_citation: boolean;
+      is_interpretation?: boolean;
+    }>;
+  };
+  visual_spec: {
+    diagrams: Array<{ type: string; title: string; description: string; mermaid_hint: string }>;
+    icon_suggestions: string[];
+  };
+  citations_report: {
+    citation_coverage: number;
+    total_scenes: number;
+    supported_scenes: number;
+    books: Array<{ book_id: string; book_title: string; cited_chunk_count: number; pages_cited: number[] }>;
+    cited_chunk_ids: string[];
+  };
+  evidence_map: {
+    paragraphs: Array<{
+      paragraph_id: string;
+      scene_number: number;
+      script_text: string;
+      evidence_refs: Array<{
+        chunk_id: string;
+        book_id: string;
+        book_title: string;
+        page_start: number | null;
+        page_end: number | null;
+        snippet: string;
+      }>;
+    }>;
+  };
+  warnings: string[];
+}
+
 export const videoApi = {
   list: (cursor?: string) => {
     const sp = new URLSearchParams();
     if (cursor) sp.set('cursor', cursor);
-    return request<{ items: unknown[]; next_cursor: string | null }>(`/video-packages?${sp}`);
+    return request<{ items: VideoPackage[]; next_cursor: string | null }>(`/video-packages?${sp}`);
   },
 
-  generate: (data: { topic: string; format: string; audience_level: string; language_mode: string }) =>
-    request<unknown>('/video-packages:generate', { method: 'POST', body: { ...data, tone: 'teacher' } }),
+  get: (videoId: string) =>
+    request<VideoPackageFull>(`/video-packages/${videoId}`),
+
+  generate: (data: { topic: string; format: string; audience_level: string; language_mode: string; tone?: string }) =>
+    request<VideoPackageFull>('/video-packages:generate', { method: 'POST', body: { tone: 'teacher', ...data } }),
+
+  exportJson: (videoId: string) =>
+    request<VideoPackageFull>(`/video-packages/${videoId}/export?format=json`),
+};
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+export const analyticsApi = {
+  bookCoverage: (bookId: string) =>
+    request<{
+      book_id: string;
+      book_title: string;
+      chunk_count: number;
+      units_total: number;
+      units_by_status: Record<string, number>;
+      citation_coverage: number | null;
+    }>(`/analytics/books/${bookId}/coverage`),
+
+  llmUsage: (params?: { from?: string; to?: string; group_by?: 'operation' | 'book' | 'user' }) => {
+    const sp = new URLSearchParams();
+    if (params?.from) sp.set('from', params.from);
+    if (params?.to) sp.set('to', params.to);
+    if (params?.group_by) sp.set('group_by', params.group_by);
+    const qs = sp.toString();
+    return request<{
+      from: string;
+      to: string;
+      group_by: string;
+      breakdown: Array<{
+        group_key: string;
+        input_tokens: number;
+        output_tokens: number;
+        total_cost_usd: number;
+        call_count: number;
+      }>;
+      totals: {
+        input_tokens: number;
+        output_tokens: number;
+        total_cost_usd: number;
+        call_count: number;
+      };
+    }>(`/analytics/llm-usage${qs ? '?' + qs : ''}`);
+  },
 };
 
 // ── Health ────────────────────────────────────────────────────────────────────

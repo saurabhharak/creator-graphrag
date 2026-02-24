@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from uuid import UUID
 
 import structlog
@@ -62,17 +63,96 @@ async def get_job(job_id: UUID, user: CurrentUserDep, db: DbSession):
 
 
 @router.get("/{job_id}/events", summary="Stream job progress (SSE)")
-async def job_events(job_id: UUID, user: CurrentUserDep):
+async def job_events(job_id: UUID, user: CurrentUserDep, db: DbSession):
     """Server-Sent Events stream for real-time job progress.
 
-    Workers publish to Redis pub/sub channel ``job:<job_id>:events``.
-    Reconnects automatically on client disconnect.
+    Yields the current job state immediately, then subscribes to the Redis
+    pub/sub channel ``job:<job_id>:events`` and streams updates until the
+    job reaches a terminal state (completed / failed / canceled).
+
+    Falls back to polling the DB every 3 s if no Redis message arrives,
+    so the client always gets an update even if Redis is temporarily down.
     """
+    job_repo = IngestionJobRepository(db)
+    job = await job_repo.get_by_id(job_id)
+    if job is None or (job.created_by != user.user_id and user.role != "admin"):
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    # Capture current state before the request-scoped DB session closes
+    initial = json.dumps({
+        "job_id": str(job_id),
+        "stage": job.stage,
+        "status": job.status,
+        "progress": job.progress,
+    })
+    is_terminal = job.status in {"completed", "failed", "canceled"}
+
     async def event_generator():
-        # TODO(#1): subscribe to Redis pub/sub channel job:{job_id}:events
-        # TODO(#1): stream events until job status is done/failed/canceled
-        yield f"data: {{\"stage\": \"upload\", \"progress\": 0}}\n\n"
-        await asyncio.sleep(1)
+        yield f"data: {initial}\n\n"
+
+        if is_terminal:
+            return
+
+        import redis.asyncio as aioredis
+        from app.core.config import settings
+        from app.infrastructure.db.session import engine
+        from sqlalchemy.ext.asyncio import AsyncSession
+
+        terminal_statuses = {"completed", "failed", "canceled"}
+        channel = f"job:{str(job_id)}:events"
+        client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        pubsub = client.pubsub()
+
+        try:
+            await pubsub.subscribe(channel)
+            last_progress = -1.0
+
+            # Hard timeout: 90 minutes for very large books
+            deadline = asyncio.get_event_loop().time() + 5400
+
+            while asyncio.get_event_loop().time() < deadline:
+                # Wait up to 3 s for a Redis message before DB-poll fallback
+                try:
+                    msg = await asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True, timeout=3),
+                        timeout=4.0,
+                    )
+                except asyncio.TimeoutError:
+                    msg = None
+
+                if msg and msg.get("type") == "message":
+                    yield f"data: {msg['data']}\n\n"
+                    try:
+                        data = json.loads(msg["data"])
+                        if data.get("status") in terminal_statuses:
+                            return
+                        last_progress = data.get("progress", last_progress)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                else:
+                    # Fallback: poll DB so client never stalls
+                    async with AsyncSession(engine) as fresh_db:
+                        fresh_repo = IngestionJobRepository(fresh_db)
+                        j = await fresh_repo.get_by_id(job_id)
+                    if j is None:
+                        return
+                    if j.progress != last_progress:
+                        evt = json.dumps({
+                            "job_id": str(job_id),
+                            "stage": j.stage,
+                            "status": j.status,
+                            "progress": j.progress,
+                        })
+                        yield f"data: {evt}\n\n"
+                        last_progress = j.progress
+                    if j.status in terminal_statuses:
+                        return
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+                await client.aclose()
+            except Exception:
+                pass
 
     return StreamingResponse(
         event_generator(),

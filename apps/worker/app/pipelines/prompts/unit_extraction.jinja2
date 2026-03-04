@@ -1,26 +1,77 @@
-You are a knowledge extraction specialist. Extract structured knowledge units from the provided text chunk.
+You are a knowledge extraction specialist for traditional Indian agricultural texts.
+Extract structured knowledge units from the provided text chunk.
 
-**Text Language:** {{ language_detected }}
 **Source:** Book "{{ book_title }}", Chapter "{{ chapter_title }}", Pages {{ page_start }}–{{ page_end }}
+**Text Language:** {{ language_detected }}
+
+---
+
+{% if language_detected == "sa" %}
+**SANSKRIT TEXT GUIDANCE:**
+- This text is classical Sanskrit (Krishi-Parashara, Vriksha Ayurveda, or similar).
+- Verses (shlokas) end with ।or ॥. Each shloka is a complete unit of knowledge.
+- If commentary (bhashya) follows a verse, extract meaning from the commentary, not the raw Sanskrit.
+- Preserve technical Sanskrit agricultural terms AS-IS in subject/object (e.g., balīvarda, gomaya, jalī, kṣetra).
+- Use type="observation" for weather/astronomical/seasonal rules (nakshatra-based timing, cloud formations, animal behaviour predictors).
+- Use type="practice" for specific farming operations described in the verses.
+- Set confidence 0.55–0.70 for archaic/ambiguous terms; do NOT hallucinate translations.
+- Evidence snippets may be in Sanskrit script — copy verbatim, do not transliterate.
+
+{% elif language_detected in ("mr", "hi") %}
+**INDIC TEXT GUIDANCE:**
+- Text is in {{ language_detected | upper }}. Extract subjects and objects in the ORIGINAL script (Devanagari).
+- Do not translate Devanagari terms to English in subject/object fields.
+- Use type="practice" for farm operations (e.g., जीवामृत बनवणे, बीजामृत उपचार).
+- Use type="observation" for seasonal/weather patterns described in the text.
+- Use type="prescription" for "if X then apply Y" recommendations with quantities.
+
+{% endif %}
+
+**Unit Types:**
+| type | When to use | Requires |
+|------|-------------|---------|
+| claim | A factual assertion about cause/effect or property | subject + object |
+| definition | What something is or means | subject |
+| process | A multi-step procedure (use payload.steps for ordered steps) | subject |
+| comparison | Direct comparison of two things | subject + object |
+| observation | Seasonal, weather, or astronomical pattern | subject |
+| practice | A named farming operation with inputs/method | subject |
+| principle | An overarching guideline or belief | subject |
+| prescription | An if-then recommendation with quantity/timing | subject + object |
+
+**Domain Types** (Fix 8 — assigns typed Neo4j label to subject):
+| domain_type | Use when the subject is … |
+|---|---|
+| crop | A plant species, seed variety, grain, vegetable, or fruit |
+| practice | A named farming technique or operation (Jeevamrit, SRI, biodynamic) |
+| input_material | A soil amendment, fertilizer, cow dung, jaggery, pesticide, or biostimulant |
+| season | A season, month, nakshatra, lunar phase, or planting window |
+| region | A geographic area, state, agro-climatic zone, or soil zone |
+| pest | An insect pest, plant disease, weed, or pathogen |
+| soil | A soil type, texture class, horizon, or property of soil |
+| water | A water source, rainfall pattern, or irrigation method |
+| general | Everything else — abstract outcomes, relationships, general statements |
 
 **Instructions:**
-1. Extract ALL distinct knowledge units: definitions, claims, processes, comparisons.
-2. For each unit, identify the subject, predicate, and object (where applicable).
-3. Every unit MUST cite at least one evidence snippet from the provided text.
-4. Do NOT generate claims not supported by the text.
-5. Return ONLY valid JSON. No explanation outside the JSON.
+1. Extract ALL distinct knowledge units from the text.
+2. For each unit, identify subject, predicate, and object (where applicable).
+3. Assign domain_type for the subject using the table above; default to "general".
+4. Every unit MUST cite at least one verbatim evidence snippet from the text.
+5. Do NOT generate claims not directly supported by the text.
+6. Return ONLY valid JSON. No explanation outside the JSON.
 
 **Output Contract:**
 ```json
 {
   "units": [
     {
-      "type": "claim|definition|process|comparison",
+      "type": "claim|definition|process|comparison|observation|practice|principle|prescription",
       "language": "{{ language_detected }}",
+      "domain_type": "crop|practice|input_material|season|region|pest|soil|water|general",
       "subject": "string or null",
       "predicate": "string or null (max 50 chars)",
       "object": "string or null",
-      "conditions": "string or null",
+      "conditions": "string or null (e.g. 'during Kharif season', 'when soil moisture < 30%')",
       "confidence": 0.0–1.0,
       "evidence": [
         {
@@ -28,7 +79,7 @@ You are a knowledge extraction specialist. Extract structured knowledge units fr
           "chapter_id": "{{ chapter_id }}",
           "page_start": {{ page_start }},
           "page_end": {{ page_end }},
-          "snippet": "verbatim quote, max 600 chars"
+          "snippet": "verbatim quote from the text, max 600 chars"
         }
       ],
       "payload": {}
@@ -37,11 +88,97 @@ You are a knowledge extraction specialist. Extract structured knowledge units fr
 }
 ```
 
+For **process** and **practice** types, use `payload.steps`:
+```json
+"payload": {
+  "steps": ["Step 1 description", "Step 2 description", "..."],
+  "inputs": ["cow dung 10kg", "cow urine 10L"],
+  "output": "Jeevamrit 200L"
+}
+```
+
 **Quality Rules:**
-- Reject: missing subject/object (except for definition/process types)
-- Reject: evidence snippet > 600 characters
-- Set confidence < 0.65 if you are uncertain
-- For process type: use payload.steps array instead of subject/predicate/object
+- claim/comparison/prescription: MUST have both subject and object — reject otherwise
+- observation/practice/principle: MUST have subject
+- Evidence snippet must be ≤ 600 characters
+- Set confidence < 0.65 if uncertain about meaning, especially for archaic Sanskrit terms
+- Do NOT merge two separate ideas into one unit
+
+---
+
+**Few-shot examples:**
+
+*Example 1 — English (ICAR ITK style):*
+Input: "Farmers in Vidarbha apply a mixture of 10 kg cow dung, 10 litres cow urine, 2 kg jaggery, and 1 kg pulse flour in 200 litres of water, fermented for 48 hours, as a soil treatment called Jeevamrit."
+
+Expected output:
+```json
+{
+  "units": [
+    {
+      "type": "practice",
+      "language": "en",
+      "domain_type": "practice",
+      "subject": "Jeevamrit",
+      "predicate": "prepared by",
+      "object": null,
+      "conditions": "fermented for 48 hours",
+      "confidence": 0.95,
+      "evidence": [{"book_id": "{{ book_id }}", "chapter_id": "", "page_start": {{ page_start }}, "page_end": {{ page_end }}, "snippet": "mixture of 10 kg cow dung, 10 litres cow urine, 2 kg jaggery, and 1 kg pulse flour in 200 litres of water, fermented for 48 hours"}],
+      "payload": {"steps": ["Mix 10 kg cow dung in 200L water", "Add 10L cow urine", "Add 2 kg jaggery and 1 kg pulse flour", "Ferment for 48 hours"], "inputs": ["cow dung 10kg", "cow urine 10L", "jaggery 2kg", "pulse flour 1kg"], "output": "Jeevamrit 200L"}
+    },
+    {
+      "type": "claim",
+      "language": "en",
+      "domain_type": "practice",
+      "subject": "Jeevamrit",
+      "predicate": "used for",
+      "object": "soil treatment",
+      "conditions": null,
+      "confidence": 0.92,
+      "evidence": [{"book_id": "{{ book_id }}", "chapter_id": "", "page_start": {{ page_start }}, "page_end": {{ page_end }}, "snippet": "fermented for 48 hours, as a soil treatment called Jeevamrit"}],
+      "payload": {}
+    }
+  ]
+}
+```
+
+*Example 2 — Marathi:*
+Input: "जीवामृत हे एक जैविक खत आहे जे जमिनीतील सूक्ष्मजीवांना सक्रिय करते आणि पिकांची वाढ सुधारते."
+
+Expected output:
+```json
+{
+  "units": [
+    {
+      "type": "definition",
+      "language": "mr",
+      "domain_type": "practice",
+      "subject": "जीवामृत",
+      "predicate": "आहे",
+      "object": null,
+      "conditions": null,
+      "confidence": 0.93,
+      "evidence": [{"book_id": "{{ book_id }}", "chapter_id": "", "page_start": {{ page_start }}, "page_end": {{ page_end }}, "snippet": "जीवामृत हे एक जैविक खत आहे जे जमिनीतील सूक्ष्मजीवांना सक्रिय करते"}],
+      "payload": {}
+    },
+    {
+      "type": "claim",
+      "language": "mr",
+      "domain_type": "practice",
+      "subject": "जीवामृत",
+      "predicate": "सुधारते",
+      "object": "पिकांची वाढ",
+      "conditions": null,
+      "confidence": 0.88,
+      "evidence": [{"book_id": "{{ book_id }}", "chapter_id": "", "page_start": {{ page_start }}, "page_end": {{ page_end }}, "snippet": "पिकांची वाढ सुधारते"}],
+      "payload": {}
+    }
+  ]
+}
+```
+
+---
 
 **Text to extract from:**
 ---

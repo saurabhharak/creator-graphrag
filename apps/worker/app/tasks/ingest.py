@@ -8,8 +8,9 @@ import structlog
 
 from app.worker import app
 from app.core.config import worker_settings
-from app.infrastructure.db import format_error, update_job_status
+from app.infrastructure.db import fetch_book_title, format_error, update_job_status
 from app.pipelines.ingestion_pipeline import IngestionConfig, IngestionPipeline
+from app.tasks.canonicalize_graph import canonicalize_concepts  # Fix 7
 
 logger = structlog.get_logger(__name__)
 
@@ -57,15 +58,32 @@ def run_ingestion(self, job_id: str, book_id: str, config_dict: dict) -> dict:
 
     # ── Run pipeline ───────────────────────────────────────────────────────────
     config = IngestionConfig(**config_dict)
+
+    # Fix 3: fetch book title so the LLM extractor and embedder know the source
+    book_title = asyncio.run(fetch_book_title(db_url, book_id))
+    logger.info("ingestion_book_title_resolved", job_id=job_id, book_title=book_title or "(not found)")
+
     pipeline = IngestionPipeline(
         job_id=UUID(job_id),
         book_id=UUID(book_id),
         config=config,
+        book_title=book_title,
     )
 
     try:
         asyncio.run(pipeline.run())
         logger.info("ingestion_succeeded", job_id=job_id)
+
+        # Fix 7: enqueue cross-lingual entity resolution after graph build.
+        # countdown=10s lets Neo4j writes fully commit before the task reads back.
+        if config.build_graph:
+            canonicalize_concepts.apply_async(
+                args=[book_id],
+                countdown=10,
+                queue="graph",
+            )
+            logger.info("canonicalize_enqueued", book_id=book_id)
+
         return {"job_id": job_id, "status": "completed"}
 
     except Exception as exc:

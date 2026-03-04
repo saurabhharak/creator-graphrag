@@ -11,6 +11,7 @@ app = Celery(
     backend=worker_settings.REDIS_URL,
     include=[
         "app.tasks.ingest",
+        "app.tasks.canonicalize_graph",
         "app.tasks.ocr",
         "app.tasks.chunk",
         "app.tasks.embed",

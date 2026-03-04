@@ -34,6 +34,7 @@ import app.infrastructure.neo4j_client as worker_neo4j
 from app.core.config import worker_settings
 from app.infrastructure.db import (
     format_error,
+    insert_chunks,
     insert_knowledge_units,
     log_llm_usage,
     update_job_status,
@@ -157,7 +158,7 @@ class IngestionPipeline:
         # ── Embed + Upsert ─────────────────────────────────────────────────────
         await self._update_stage("embed", 0.0)
         # Fix 4: capture hash→point_id map for evidence trail
-        chunk_id_map = await self._embed_and_upsert(chunks)
+        chunk_id_map = await self._embed_and_upsert(chunks, source_type=self.config.source_format)
         await self._update_stage("embed", 1.0)
 
         # ── Knowledge unit extraction ──────────────────────────────────────────
@@ -186,8 +187,12 @@ class IngestionPipeline:
 
     # ── Shared embed + upsert helper ───────────────────────────────────────────
 
-    async def _embed_and_upsert(self, chunks: list[TextChunk]) -> dict[str, str]:
-        """Embed chunks with Ollama (contextual prefix) and upsert to Qdrant.
+    async def _embed_and_upsert(
+        self,
+        chunks: list[TextChunk],
+        source_type: str = "pre_extracted_sarvam",
+    ) -> dict[str, str]:
+        """Embed chunks (contextual prefix), upsert to Qdrant, and insert into Postgres chunks table.
 
         Fix 2: Per-chunk contextual prefix (book + section + pages) is prepended
         before embedding, improving retrieval recall by 20-49%. Raw chunk text
@@ -195,6 +200,9 @@ class IngestionPipeline:
 
         Fix 4: Returns dict[text_hash → point_id] for evidence trail wiring
         in _stage_unit_extract.
+
+        Chunks are also inserted into the Postgres `chunks` table so that
+        knowledge_units.source_chunk_id FK references are satisfied.
         """
         ensure_collection(
             self._qdrant,
@@ -218,8 +226,11 @@ class IngestionPipeline:
 
         embed_results = embed_batch(
             texts,
-            endpoint=worker_settings.OLLAMA_ENDPOINT,
+            provider=worker_settings.EMBEDDING_PROVIDER,
             model=worker_settings.EMBEDDING_MODEL,
+            endpoint=worker_settings.OLLAMA_ENDPOINT,
+            hf_url=worker_settings.HF_EMBEDDING_URL,
+            hf_token=worker_settings.HF_TOKEN,
             prefixes=prefixes,
         )
 
@@ -254,6 +265,28 @@ class IngestionPipeline:
             points=len(points),
             book_title=self.book_title or "(unknown)",
         )
+
+        # Insert chunks into Postgres so knowledge_units.source_chunk_id FK is satisfied
+        chunks_data = [
+            {
+                "chunk_id": hash_to_point_id[chunk.text_hash],
+                "book_id": book_id_str,
+                "chunk_type": chunk.chunk_type,
+                "language_detected": chunk.language_detected,
+                "language_confidence": chunk.language_confidence,
+                "source_type": source_type,
+                "page_start": chunk.page_start,
+                "page_end": chunk.page_end,
+                "section_title": chunk.section_title,
+                "text": chunk.text,
+                "text_hash": chunk.text_hash,
+                "vector_ref": hash_to_point_id[chunk.text_hash],
+                "embedding_model_id": worker_settings.EMBEDDING_MODEL,
+            }
+            for chunk in chunks
+        ]
+        await insert_chunks(self._db_url, chunks_data)
+
         return hash_to_point_id
 
     # ── Standard PDF stage stubs ───────────────────────────────────────────────
@@ -329,7 +362,7 @@ class IngestionPipeline:
         await self._update_stage("embed", 0.0)
         chunk_id_map: dict[str, str] = {}
         if chunks:
-            chunk_id_map = await self._embed_and_upsert(chunks)
+            chunk_id_map = await self._embed_and_upsert(chunks, source_type=self.config.source_format)
         await self._update_stage("embed", 1.0)
         return chunk_id_map
 

@@ -28,10 +28,12 @@ class WorkerSettings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     OPENAI_BASE_URL: str | None = None   # e.g. https://zenmux.ai/api/v1
     LLM_EXTRACTION_MODEL: str = "openai/gpt-4.1"
+    EMBEDDING_PROVIDER: str = "ollama"   # "ollama" | "huggingface"
     EMBEDDING_MODEL: str = "qwen3-embedding:8b"
     EMBEDDING_DIMENSION: int = 4096   # qwen3-embedding:8b native output dim
-    BGE_M3_ENDPOINT: str | None = None
     OLLAMA_ENDPOINT: str = "http://localhost:11434"
+    HF_TOKEN: str | None = None
+    HF_EMBEDDING_URL: str = "https://router.huggingface.co/scaleway/v1/embeddings"
 
     SARVAM_API_KEY: str | None = None
 

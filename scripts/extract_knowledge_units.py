@@ -192,10 +192,22 @@ def _parse_and_validate(raw_json: str) -> list[ExtractedUnit]:
     return valid
 
 
+def _strip_nulls(s: str | None) -> str | None:
+    """Strip null bytes that PostgreSQL rejects."""
+    return s.replace("\x00", "") if s else s
+
+
 def _to_db_dict(unit: ExtractedUnit, source_book_id: str, chunk_id: str | None = None) -> dict:
     """Convert an ExtractedUnit to a dict for DB insertion."""
     status = "needs_review" if unit.confidence < NEEDS_REVIEW_THRESHOLD else "extracted"
-    canonical = make_canonical_key(unit.subject) if unit.subject else None
+    subject = _strip_nulls(unit.subject)
+    canonical = make_canonical_key(subject) if subject else None
+
+    evidence = []
+    for e in unit.evidence:
+        d = e.model_dump()
+        d["snippet"] = _strip_nulls(d.get("snippet"))
+        evidence.append(d)
 
     return {
         "unit_id": str(uuid.uuid4()),
@@ -204,13 +216,13 @@ def _to_db_dict(unit: ExtractedUnit, source_book_id: str, chunk_id: str | None =
         "type": unit.type,
         "language_detected": unit.language,
         "language_confidence": None,
-        "subject": unit.subject,
-        "predicate": unit.predicate,
-        "object": unit.object,
+        "subject": subject,
+        "predicate": _strip_nulls(unit.predicate),
+        "object": _strip_nulls(unit.object),
         "payload_jsonb": unit.payload,
         "confidence": unit.confidence,
         "status": status,
-        "evidence_jsonb": [e.model_dump() for e in unit.evidence],
+        "evidence_jsonb": evidence,
         "canonical_key": canonical,
     }
 
@@ -498,8 +510,37 @@ async def _ensure_books_in_postgres(pg_url: str, books: dict[str, list[dict]]) -
 # ── Main extraction loop ──────────────────────────────────────────────────────
 
 
+# ── Checkpoint helpers ────────────────────────────────────────────────────────
+
+_CHECKPOINT_FILE = Path(__file__).resolve().parent.parent / "data" / "extraction_state.json"
+
+
+def _load_checkpoint() -> set[str]:
+    """Load set of already-processed chunk point_ids from checkpoint file."""
+    if _CHECKPOINT_FILE.exists():
+        try:
+            data = json.loads(_CHECKPOINT_FILE.read_text(encoding="utf-8"))
+            ids = set(data.get("processed_point_ids", []))
+            print(f"[CHECKPOINT] Loaded {len(ids):,} already-processed chunks from {_CHECKPOINT_FILE.name}")
+            return ids
+        except Exception as exc:
+            print(f"[CHECKPOINT] Could not read checkpoint: {exc} — starting fresh")
+    return set()
+
+
+def _save_checkpoint(processed: set[str]) -> None:
+    """Persist processed point_ids to checkpoint file."""
+    _CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _CHECKPOINT_FILE.write_text(
+        json.dumps({"processed_point_ids": sorted(processed)}, indent=2),
+        encoding="utf-8",
+    )
+
+
 async def run_extraction(args: argparse.Namespace) -> None:
-    """Main extraction loop."""
+    """Main extraction loop with concurrent LLM calls and per-chunk checkpointing."""
+    import asyncio as _asyncio
+
     # Load .env if available
     env_path = Path(__file__).resolve().parent.parent / ".env"
     env_vars: dict[str, str] = {}
@@ -510,10 +551,15 @@ async def run_extraction(args: argparse.Namespace) -> None:
                 key, _, val = line.partition("=")
                 env_vars[key.strip()] = val.strip()
 
+    if getattr(args, "reset_checkpoint", False) and _CHECKPOINT_FILE.exists():
+        _CHECKPOINT_FILE.unlink()
+        print(f"[CHECKPOINT] Deleted {_CHECKPOINT_FILE.name}")
+
     api_key = args.api_key or env_vars.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     base_url = args.base_url or env_vars.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     pg_url = args.pg_url or env_vars.get("DATABASE_URL") or os.environ.get("DATABASE_URL")
     model = args.model
+    concurrency = args.concurrency
 
     if not api_key:
         print("ERROR: No API key provided. Use --api-key or set OPENAI_API_KEY", file=sys.stderr)
@@ -560,16 +606,45 @@ async def run_extraction(args: argparse.Namespace) -> None:
         return
 
     # ── Ensure book records exist in PostgreSQL ───────────────────────────────
-    # import_sarvam.py writes only to Qdrant; the knowledge_units table has
-    # a FK to books.book_id, so we need to ensure book rows exist first.
     await _ensure_books_in_postgres(pg_url, books)
 
-    # ── Resume logic ──────────────────────────────────────────────────────────
-    skip_book_ids: set[str] = set()
+    # ── Resume: load checkpoint (per-chunk) ───────────────────────────────────
+    processed_point_ids: set[str] = set()
+
     if args.resume:
-        skip_book_ids = await _get_existing_book_ids_with_units(pg_url)
-        if skip_book_ids:
-            print(f"\n[RESUME] Found existing units for {len(skip_book_ids)} books, will skip them")
+        processed_point_ids = _load_checkpoint()
+        print(f"[CHECKPOINT] Loaded {len(processed_point_ids)} already-processed chunks from extraction_state.json")
+
+    # ── Semaphore for concurrent LLM calls ────────────────────────────────────
+    semaphore = _asyncio.Semaphore(concurrency)
+    print(f"\nConcurrency: {concurrency} parallel LLM calls")
+
+    async def _process_chunk(chunk: dict, book_id: str, book_name: str) -> tuple[list[dict], int, int, bool]:
+        """Call LLM for one chunk, return (units, in_tok, out_tok, had_error)."""
+        async with semaphore:
+            try:
+                prompt = _render_prompt(
+                    language_detected=chunk["language_detected"],
+                    book_title=book_name,
+                    chapter_title=chunk["section_title"] or "",
+                    page_start=chunk["page_start"],
+                    page_end=chunk["page_end"],
+                    book_id=book_id,
+                    chunk_text=chunk["text"],
+                )
+                content, in_tok, out_tok = await _call_llm(
+                    system_prompt=prompt,
+                    user_prompt="Extract knowledge units from the text above.",
+                    model=model,
+                    api_key=api_key,
+                    base_url=base_url,
+                )
+                units = _parse_and_validate(content)
+                db_dicts = [_to_db_dict(u, book_id) for u in units]
+                return db_dicts, in_tok, out_tok, False
+            except Exception as exc:
+                print(f"    ERROR [{chunk['point_id'][:8]}]: {type(exc).__name__}: {str(exc)[:120]}")
+                return [], 0, 0, True
 
     # ── Process each book ─────────────────────────────────────────────────────
     total_units = 0
@@ -580,68 +655,59 @@ async def run_extraction(args: argparse.Namespace) -> None:
     for book_name, book_chunks in books.items():
         book_id = book_chunks[0]["book_id"]
 
-        if args.resume and book_id in skip_book_ids:
-            existing = await _count_units_for_book(pg_url, book_id)
-            print(f"\n{'─' * 60}")
-            print(f"  BOOK  {book_name}")
-            print(f"  SKIP  already has {existing} units (use --force to re-extract)")
-            continue
+        # Filter out already-processed chunks via checkpoint
+        pending = [c for c in book_chunks if c["point_id"] not in processed_point_ids]
+        skipped_chunks = len(book_chunks) - len(pending)
 
         print(f"\n{'─' * 60}")
-        print(f"  BOOK  {book_name}")
-        print(f"  ID    {book_id}")
-        print(f"  CHUNKS {len(book_chunks)}")
-        print(f"  MODEL  {model}")
-        print(f"  LLM    {base_url or 'https://api.openai.com/v1'}")
+        print(f"  BOOK    {book_name}")
+        print(f"  ID      {book_id}")
+        print(f"  CHUNKS  {len(pending)} to process ({skipped_chunks} already done)")
+        print(f"  MODEL   {model}  |  concurrency={concurrency}")
+        print(f"  LLM     {base_url or 'https://api.openai.com/v1'}")
+
+        if not pending:
+            print("  SKIP  all chunks already processed (checkpoint)")
+            continue
 
         book_units: list[dict] = []
         book_in_tok = 0
         book_out_tok = 0
         book_errors = 0
 
-        for i, chunk in enumerate(book_chunks):
-            try:
-                system_prompt = _render_prompt(
-                    language_detected=chunk["language_detected"],
-                    book_title=book_name,
-                    chapter_title=chunk["section_title"] or "",
-                    page_start=chunk["page_start"],
-                    page_end=chunk["page_end"],
-                    book_id=book_id,
-                    chunk_text=chunk["text"],
-                )
+        # Process in batches to report progress and save checkpoint incrementally
+        batch_size = args.batch_size
+        for batch_start in range(0, len(pending), batch_size):
+            batch = pending[batch_start:batch_start + batch_size]
 
-                content, in_tok, out_tok = await _call_llm(
-                    system_prompt=system_prompt,
-                    user_prompt="Extract knowledge units from the text above.",
-                    model=model,
-                    api_key=api_key,
-                    base_url=base_url,
-                )
+            results = await _asyncio.gather(*[
+                _process_chunk(c, book_id, book_name) for c in batch
+            ])
 
+            for chunk, (units, in_tok, out_tok, had_error) in zip(batch, results):
+                book_units.extend(units)
                 book_in_tok += in_tok
                 book_out_tok += out_tok
+                if had_error:
+                    book_errors += 1
+                else:
+                    processed_point_ids.add(chunk["point_id"])
 
-                units = _parse_and_validate(content)
-                db_dicts = [_to_db_dict(u, book_id) for u in units]
-                book_units.extend(db_dicts)
+            # Flush units to DB and save checkpoint after each batch
+            if book_units:
+                await _insert_knowledge_units(pg_url, book_units)
+                book_units = []
+            _save_checkpoint(processed_point_ids)
 
-            except Exception as exc:
-                book_errors += 1
-                print(f"    ERROR chunk {i + 1}: {type(exc).__name__}: {str(exc)[:100]}")
+            done = min(batch_start + batch_size, len(pending))
+            nr = 0  # already flushed, can't count needs_review here
+            print(
+                f"    [{done}/{len(pending)}] "
+                f"tokens={book_in_tok + book_out_tok:,} "
+                f"errors={book_errors}"
+            )
 
-            # Progress reporting
-            if (i + 1) % args.batch_size == 0 or (i + 1) == len(book_chunks):
-                nr = sum(1 for u in book_units if u["status"] == "needs_review")
-                print(
-                    f"    [{i + 1}/{len(book_chunks)}] "
-                    f"units={len(book_units)} "
-                    f"(needs_review={nr}) "
-                    f"tokens={book_in_tok + book_out_tok:,} "
-                    f"errors={book_errors}"
-                )
-
-        # Log LLM usage
+        # Log LLM usage per book
         if book_in_tok > 0:
             await _log_llm_usage(
                 pg_url,
@@ -652,22 +718,11 @@ async def run_extraction(args: argparse.Namespace) -> None:
                 book_id=book_id,
             )
 
-        # Insert knowledge units
-        if book_units:
-            await _insert_knowledge_units(pg_url, book_units)
+        final_count = await _count_units_for_book(pg_url, book_id)
+        print(f"  DONE  book_id={book_id[:8]} | total KUs in DB: {final_count}")
+        print(f"    Tokens: {book_in_tok:,} in + {book_out_tok:,} out | errors={book_errors}")
 
-        # Book summary
-        needs_review = sum(1 for u in book_units if u["status"] == "needs_review")
-        type_dist = {}
-        for u in book_units:
-            type_dist[u["type"]] = type_dist.get(u["type"], 0) + 1
-
-        print(f"  DONE  {len(book_units)} units extracted")
-        print(f"    Types: {type_dist}")
-        print(f"    Needs review: {needs_review}")
-        print(f"    Tokens: {book_in_tok:,} in + {book_out_tok:,} out = {book_in_tok + book_out_tok:,}")
-
-        total_units += len(book_units)
+        total_units += final_count
         total_input_tokens += book_in_tok
         total_output_tokens += book_out_tok
         total_errors += book_errors
@@ -675,11 +730,12 @@ async def run_extraction(args: argparse.Namespace) -> None:
     # ── Final summary ─────────────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
     print("Extraction Summary:")
-    print(f"  Total units:    {total_units}")
-    print(f"  Total tokens:   {total_input_tokens + total_output_tokens:,}")
-    print(f"  Total errors:   {total_errors}")
+    print(f"  Total KUs in DB:  {total_units}")
+    print(f"  Total tokens:     {total_input_tokens + total_output_tokens:,}")
+    print(f"  Total errors:     {total_errors}")
     est_cost = (total_input_tokens * 0.005 + total_output_tokens * 0.015) / 1000
-    print(f"  Est. cost:      ${est_cost:.4f}")
+    print(f"  Est. cost:        ${est_cost:.4f}")
+    print(f"  Checkpoint:       {_CHECKPOINT_FILE}")
     print("=" * 60)
 
 
@@ -705,15 +761,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-url", metavar="URL", default=None,
                    help="OpenAI base URL (default: from .env OPENAI_BASE_URL)")
     p.add_argument("--batch-size", type=int, default=10,
-                   help="Chunks per progress report (default: 10)")
+                   help="Chunks per concurrent batch (default: 10)")
+    p.add_argument("--concurrency", type=int, default=5,
+                   help="Max parallel LLM calls (default: 5, safe for Zenmux subscription)")
     p.add_argument("--max-chunks", type=int, default=None,
                    help="Max chunks to process (default: all)")
     p.add_argument("--resume", action="store_true",
-                   help="Skip books that already have units in DB")
+                   help="Resume: skip books with units in DB + skip chunks in checkpoint file")
     p.add_argument("--dry-run", action="store_true",
                    help="Count chunks without calling LLM")
     p.add_argument("--force", action="store_true",
                    help="Re-extract even if units exist for book")
+    p.add_argument("--reset-checkpoint", action="store_true",
+                   help="Delete checkpoint file and start fresh")
     return p.parse_args()
 
 

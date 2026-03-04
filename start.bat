@@ -2,7 +2,7 @@
 REM ============================================================
 REM Creator GraphRAG -- Single-command startup (Windows)
 REM Usage:  start.bat           (starts everything)
-REM         start.bat --backend (starts backend only)
+REM         start.bat --backend (starts API + worker only)
 REM         start.bat --frontend(starts frontend only)
 REM ============================================================
 
@@ -16,7 +16,7 @@ echo  +-------------------------------------------+
 echo.
 
 REM -- 1. Docker services ----------------------------------------
-echo [1/6] Checking Docker services...
+echo [1/7] Checking Docker services...
 docker info >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo  ERROR: Docker is not running. Start Docker Desktop first.
@@ -39,12 +39,12 @@ timeout /t 12 /nobreak >nul
 echo  Docker services ready.
 
 REM -- 2. Auto-restore DBs if empty ---------------------------------
-echo [2/6] Checking databases for data...
+echo [2/7] Checking databases for data...
 python "%ROOT%scripts\db_manager.py" auto-restore
 echo  Database check complete.
 
 REM -- 3. Check Ollama -------------------------------------------
-echo [3/6] Checking Ollama...
+echo [3/7] Checking Ollama...
 curl -s http://localhost:11434/api/tags >nul 2>&1
 if %ERRORLEVEL% neq 0 (
     echo  WARNING: Ollama is not running on port 11434.
@@ -57,7 +57,7 @@ if %ERRORLEVEL% neq 0 (
 )
 
 REM -- 4. Frontend deps ------------------------------------------
-echo [4/6] Checking frontend dependencies...
+echo [4/7] Checking frontend dependencies...
 if not exist "%ROOT%apps\web\node_modules" (
     echo  Installing npm packages...
     cd /d "%ROOT%apps\web"
@@ -69,15 +69,20 @@ if not exist "%ROOT%apps\web\node_modules" (
 
 REM -- 5. Start Backend ------------------------------------------
 if "%1"=="--frontend" goto :start_frontend
-echo [5/6] Starting Backend (FastAPI) on port 8000...
+echo [5/7] Starting Backend (FastAPI) on port 8000...
 REM NOTE: --reload is for development only. For production use: --workers 4
 start "Creator-GraphRAG-Backend" cmd /k "cd /d %ROOT%apps\api && uvicorn app.main:app --reload --port 8000"
 timeout /t 3 /nobreak >nul
 
-REM -- 6. Start Frontend -----------------------------------------
+REM -- 6. Start Worker -------------------------------------------
+echo [6/7] Starting Worker (Celery)...
+start "Creator-GraphRAG-Worker" cmd /k "cd /d %ROOT%apps\worker && celery -A app.worker worker --loglevel=info -Q default,ocr,embed,graph -c 4"
+timeout /t 2 /nobreak >nul
+
+REM -- 7. Start Frontend -----------------------------------------
 :start_frontend
 if "%1"=="--backend" goto :done
-echo [6/6] Starting Frontend (Vite) on port 3000...
+echo [7/7] Starting Frontend (Vite) on port 3000...
 start "Creator-GraphRAG-Frontend" cmd /k "cd /d %ROOT%apps\web && npm run dev"
 
 :done
@@ -87,6 +92,7 @@ echo  ^|  All services started!                                ^|
 echo  ^|                                                       ^|
 echo  ^|  Backend API:    http://localhost:8000                 ^|
 echo  ^|  Swagger Docs:   http://localhost:8000/docs            ^|
+echo  ^|  Worker Queue:   Celery (default, ocr, embed, graph)  ^|
 echo  ^|  Frontend UI:    http://localhost:3000                 ^|
 echo  ^|  Neo4j Browser:  http://localhost:7474                 ^|
 echo  ^|  MinIO Console:  http://localhost:9001                 ^|

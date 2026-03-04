@@ -218,22 +218,48 @@ def _embed(
     baseten_api_key: str | None = None,
     baseten_base_url: str = "https://model-q84l5lgw.api.baseten.co/environments/production/predict",
 ) -> list[list[float]]:
-    """Embed texts via Baseten, Ollama, a custom HTTP endpoint, or HuggingFace.
+    """Embed texts via embed_url, Baseten, HuggingFace InferenceClient, or Ollama.
 
     Priority:
-      0. baseten_api_key set → Baseten /predict endpoint
-      1. hf_token set        → HuggingFace InferenceClient (provider=scaleway)
-      2. embed_url set       → custom HTTP endpoint: POST {text:...} → {embeddings:[...]}
+      0. embed_url set       → OpenAI-compatible batch endpoint (uses hf_token as Bearer if set)
+      1. baseten_api_key set → Baseten /predict endpoint
+      2. hf_token set        → HuggingFace InferenceClient
       3. default             → Ollama /api/embeddings
     """
+    import httpx
     vectors: list[list[float]] = []
+
+    # ── OpenAI-compatible batch endpoint (e.g. HF Scaleway router) ────────
+    if embed_url:
+        headers = {"Content-Type": "application/json"}
+        if hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        # Scaleway uses lowercase model name without org prefix
+        openai_model = hf_model.split("/")[-1].lower() if "/" in hf_model else hf_model
+        batch_size = 32
+        with httpx.Client(timeout=300.0) as client:
+            for start in range(0, len(texts), batch_size):
+                batch = [t for t in texts[start:start + batch_size] if t.strip()]
+                if not batch:
+                    continue
+                resp = client.post(
+                    embed_url,
+                    headers=headers,
+                    json={"model": openai_model, "input": batch},
+                )
+                resp.raise_for_status()
+                for item in resp.json()["data"]:
+                    vectors.append(item["embedding"])
+                done = min(start + batch_size, len(texts))
+                if done % 64 == 0 or done == len(texts):
+                    print(f"    embedded {done}/{len(texts)} (OpenAI endpoint)...")
+        return vectors
 
     # ── Baseten /predict endpoint ──────────────────────────────────────────
     if baseten_api_key:
-        import httpx as _httpx
         bt_headers = {"Authorization": f"Api-Key {baseten_api_key}"}
         batch_size = 16
-        with _httpx.Client(timeout=300.0) as bt_client:
+        with httpx.Client(timeout=300.0) as bt_client:
             for start in range(0, len(texts), batch_size):
                 batch = [t for t in texts[start:start + batch_size] if t.strip()]
                 if not batch:
@@ -244,8 +270,7 @@ def _embed(
                     json={"input": batch, "model": "model", "encoding_format": "float"},
                 )
                 resp.raise_for_status()
-                data = resp.json()
-                for item in data["data"]:
+                for item in resp.json()["data"]:
                     vectors.append(item["embedding"])
                 done = min(start + batch_size, len(texts))
                 if done % 25 == 0 or done == len(texts):
@@ -254,33 +279,24 @@ def _embed(
 
     if hf_token:
         from huggingface_hub import InferenceClient
-        hf_client = InferenceClient(api_key=hf_token)  # HF's own free inference servers
+        hf_client = InferenceClient(api_key=hf_token)
         for i, text in enumerate(texts):
             if not text.strip():
                 continue
             result = hf_client.feature_extraction(text, model=hf_model)
-            # returns numpy array shape (1, dim) or (dim,)
             import numpy as np
-            arr = np.array(result).flatten().tolist()
-            vectors.append(arr)
+            vectors.append(np.array(result).flatten().tolist())
             if (i + 1) % 25 == 0:
                 print(f"    embedded {i + 1}/{len(texts)}...")
         return vectors
 
-    import httpx
-    _tunnel_headers = {"Bypass-Tunnel-Reminder": "true", "User-Agent": "import-sarvam/1.0"}
     with httpx.Client(timeout=300.0) as client:
         for i, text in enumerate(texts):
             if not text.strip():
                 continue
-            if embed_url:
-                resp = client.post(embed_url, json={"text": text}, headers=_tunnel_headers)
-                resp.raise_for_status()
-                vectors.append(resp.json()["embeddings"])
-            else:
-                resp = client.post(f"{endpoint}/api/embeddings", json={"model": model, "prompt": text})
-                resp.raise_for_status()
-                vectors.append(resp.json()["embedding"])
+            resp = client.post(f"{endpoint}/api/embeddings", json={"model": model, "prompt": text})
+            resp.raise_for_status()
+            vectors.append(resp.json()["embedding"])
             if (i + 1) % 25 == 0:
                 print(f"    embedded {i + 1}/{len(texts)}...")
     return vectors
@@ -415,12 +431,12 @@ def import_book(
         return {"status": "dry_run", "chunks": len(chunks), "book_id": book_id}
 
     # Embed
-    if baseten_api_key:
+    if embed_url:
+        src = embed_url
+    elif baseten_api_key:
         src = f"Baseten ({baseten_base_url})"
     elif hf_token:
-        src = f"HuggingFace/Scaleway ({hf_model})"
-    elif embed_url:
-        src = embed_url
+        src = f"HuggingFace InferenceClient ({hf_model})"
     else:
         src = f"{ollama_endpoint}/api/embeddings"
     print(f"  EMBED sending {len(chunks)} texts ({src})...")
@@ -552,7 +568,31 @@ def main() -> None:
     # Verify embedding source is reachable (unless dry-run)
     if not args.dry_run:
         import httpx
-        if baseten_api_key:
+        if embed_url:
+            # Verify OpenAI-compatible embed endpoint
+            try:
+                probe_headers = {"Content-Type": "application/json"}
+                if hf_token:
+                    probe_headers["Authorization"] = f"Bearer {hf_token}"
+                # Scaleway requires lowercase model name without org prefix
+                probe_model = hf_model.split("/")[-1].lower() if "/" in hf_model else hf_model
+                r = httpx.post(
+                    embed_url,
+                    json={"model": probe_model, "input": ["ping"]},
+                    headers=probe_headers,
+                    timeout=30.0,
+                )
+                r.raise_for_status()
+                dim = len(r.json()["data"][0]["embedding"])
+                print(f"Embed endpoint reachable at {embed_url}, model={probe_model}, dim={dim}")
+            except Exception as exc:
+                print(
+                    f"\nERROR: Embed endpoint not reachable at {embed_url}\n"
+                    f"  {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        elif baseten_api_key:
             # Quick probe to verify Baseten connectivity
             try:
                 r = httpx.post(
@@ -568,31 +608,16 @@ def main() -> None:
                       f"  {exc}", file=sys.stderr)
                 sys.exit(1)
         elif hf_token:
-            # Quick probe to verify HF/Scaleway connectivity
+            # Quick probe to verify HF InferenceClient connectivity
             try:
                 from huggingface_hub import InferenceClient
-                hf_client = InferenceClient(provider="scaleway", api_key=hf_token)
+                hf_client = InferenceClient(api_key=hf_token)
                 result = hf_client.feature_extraction("ping", model=hf_model)
                 import numpy as np
                 dim = np.array(result).flatten().shape[0]
-                print(f"HuggingFace/Scaleway reachable. Model: {hf_model}, dim={dim}")
+                print(f"HuggingFace inference reachable. Model: {hf_model}, dim={dim}")
             except Exception as exc:
-                print(f"\nERROR: HuggingFace/Scaleway not reachable: {exc}", file=sys.stderr)
-                sys.exit(1)
-        elif embed_url:
-            # Verify custom endpoint with a short probe
-            _tunnel_headers = {"Bypass-Tunnel-Reminder": "true", "User-Agent": "import-sarvam/1.0"}
-            try:
-                r = httpx.post(embed_url, json={"text": "ping"}, timeout=30.0,
-                               headers=_tunnel_headers)
-                r.raise_for_status()
-                print(f"Custom embed endpoint reachable at {embed_url}")
-            except Exception as exc:
-                print(
-                    f"\nERROR: Custom embed endpoint not reachable at {embed_url}\n"
-                    f"  {exc}",
-                    file=sys.stderr,
-                )
+                print(f"\nERROR: HuggingFace inference not reachable: {exc}", file=sys.stderr)
                 sys.exit(1)
         else:
             # Verify Ollama

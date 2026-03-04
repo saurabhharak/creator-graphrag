@@ -33,7 +33,7 @@ async def call_openai(
     api_key: str | None = None,
     base_url: str | None = None,
     temperature: float = 0.1,
-    max_tokens: int = 4000,
+    max_tokens: int = 16000,
 ) -> LlmResponse:
     """Call OpenAI-compatible chat completion and return a structured response.
 

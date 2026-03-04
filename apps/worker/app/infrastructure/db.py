@@ -30,6 +30,7 @@ async def update_job_status(
     progress: float | None = None,
     message: str | None = None,
     error_json: dict[str, Any] | None = None,
+    metrics_json: dict[str, Any] | None = None,
     celery_task_id: str | None = None,
 ) -> None:
     """Partially update an ingestion_jobs row.
@@ -73,6 +74,10 @@ async def update_job_status(
     if error_json is not None:
         set_clauses.append(f"error_json = ${idx}::jsonb")
         params.append(json.dumps(error_json))
+        idx += 1
+    if metrics_json is not None:
+        set_clauses.append(f"metrics_json = ${idx}::jsonb")
+        params.append(json.dumps(metrics_json))
         idx += 1
     if celery_task_id is not None:
         set_clauses.append(f"celery_task_id = ${idx}")
@@ -182,6 +187,63 @@ async def insert_knowledge_units(database_url: str, units: list[dict]) -> None:
         await conn.close()
 
 
+async def insert_chunks(database_url: str, chunks_data: list[dict]) -> None:
+    """Bulk INSERT chunk rows via asyncpg executemany.
+
+    Each dict must have: chunk_id, book_id, chunk_type, language_detected,
+    source_type, text, text_hash.
+    Optional: chapter_id, language_confidence, page_start, page_end,
+              section_title, vector_ref, embedding_model_id.
+    """
+    if not chunks_data:
+        return
+
+    sql = """
+        INSERT INTO chunks (
+            chunk_id, book_id, chapter_id,
+            chunk_type, language_detected, language_confidence,
+            source_type, page_start, page_end, section_title,
+            text, text_hash, vector_ref, embedding_model_id
+        ) VALUES (
+            $1::uuid, $2::uuid, $3::uuid,
+            $4, $5, $6,
+            $7, $8, $9, $10,
+            $11, $12, $13, $14
+        )
+        ON CONFLICT (book_id, text_hash) DO NOTHING
+    """
+
+    rows = [
+        (
+            c["chunk_id"],
+            c["book_id"],
+            c.get("chapter_id"),
+            c["chunk_type"],
+            c["language_detected"],
+            c.get("language_confidence"),
+            c["source_type"],
+            c.get("page_start"),
+            c.get("page_end"),
+            c.get("section_title"),
+            c["text"],
+            c["text_hash"],
+            c.get("vector_ref"),
+            c.get("embedding_model_id"),
+        )
+        for c in chunks_data
+    ]
+
+    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
+    try:
+        await conn.executemany(sql, rows)
+        logger.info("chunks_inserted", count=len(rows))
+    except Exception:
+        logger.error("chunks_insert_failed", exc_info=True)
+        raise
+    finally:
+        await conn.close()
+
+
 async def log_llm_usage(
     database_url: str,
     *,
@@ -286,6 +348,20 @@ async def publish_job_event(
             await client.aclose()
     except Exception:
         logger.warning("redis_publish_failed", job_id=job_id)
+
+
+async def fetch_book_title(database_url: str, book_id: str) -> str:
+    """Return the title of a book by its UUID, or empty string if not found."""
+    url = _pg_url(database_url)
+    conn: asyncpg.Connection = await asyncpg.connect(url)
+    try:
+        row = await conn.fetchrow(
+            "SELECT title FROM books WHERE book_id = $1::uuid",
+            book_id,
+        )
+        return row["title"] if row else ""
+    finally:
+        await conn.close()
 
 
 def format_error(exc: BaseException) -> dict[str, str]:

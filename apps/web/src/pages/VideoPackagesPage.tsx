@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { videoApi, VideoPackage, VideoPackageFull } from '../api/client';
+import { videoApi, type VideoPackage, type VideoPackageFull } from '../api/client';
 import {
     Video, Sparkles, Loader, Clock, FileText, Eye, Layers, AlertTriangle,
     ChevronDown, ChevronUp, Download, BookOpen, BarChart3, Film, ArrowLeft,
@@ -19,12 +19,26 @@ export default function VideoPackagesPage() {
     const [loadingList, setLoadingList] = useState(true);
 
     // Generate form state
+    const VALID_FORMATS = ['explainer', 'shorts', 'deep_dive'];
+    const VALID_AUDIENCES = ['beginner', 'intermediate'];
+    const VALID_TONES = ['teacher', 'storyteller', 'myth_buster', 'step_by_step'];
+    const VALID_LANGS = ['en', 'mr', 'hi', 'hinglish', 'mr_plus_en_terms', 'hi_plus_en_terms'];
+
     const [topic, setTopic] = useState('');
     const [format, setFormat] = useState('explainer');
     const [audience, setAudience] = useState('beginner');
     const [langMode, setLangMode] = useState('en');
     const [tone, setTone] = useState('teacher');
     const [generating, setGenerating] = useState(false);
+
+    // Normalize any stale state from HMR / session carry-over
+    useEffect(() => {
+        if (!VALID_FORMATS.includes(format)) setFormat('explainer');
+        if (!VALID_AUDIENCES.includes(audience)) setAudience('beginner');
+        if (!VALID_TONES.includes(tone)) setTone('teacher');
+        if (!VALID_LANGS.includes(langMode)) setLangMode('en');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Detail state
     const [detail, setDetail] = useState<VideoPackageFull | null>(null);
@@ -190,8 +204,8 @@ export default function VideoPackagesPage() {
                                     <select value={tone} onChange={e => setTone(e.target.value)}>
                                         <option value="teacher">Teacher</option>
                                         <option value="storyteller">Storyteller</option>
-                                        <option value="documentary">Documentary</option>
-                                        <option value="conversational">Conversational</option>
+                                        <option value="myth_buster">Myth Buster</option>
+                                        <option value="step_by_step">Step by Step</option>
                                     </select>
                                 </div>
                             </div>
@@ -201,7 +215,6 @@ export default function VideoPackagesPage() {
                                     <select value={audience} onChange={e => setAudience(e.target.value)}>
                                         <option value="beginner">Beginner</option>
                                         <option value="intermediate">Intermediate</option>
-                                        <option value="expert">Expert</option>
                                     </select>
                                 </div>
                                 <div className="input-group">

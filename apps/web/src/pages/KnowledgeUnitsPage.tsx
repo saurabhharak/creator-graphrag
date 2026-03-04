@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { kuApi, type KnowledgeUnit } from '../api/client';
-import { BrainCircuit, Check, X, Search, Filter } from 'lucide-react';
+import { BrainCircuit, Check, X, Search } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function KnowledgeUnitsPage() {

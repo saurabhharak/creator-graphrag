@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     LLM_PROVIDER: Literal["openai", "azure"] = "openai"
     OPENAI_API_KEY: str | None = None
     OPENAI_BASE_URL: str | None = None  # e.g. https://zenmux.ai/api/v1
+    ZENMUX_USER_TOKEN: str | None = None  # Optional: Zenmux dashboard session token for balance lookup
     AZURE_OPENAI_ENDPOINT: str | None = None
     AZURE_OPENAI_API_KEY: str | None = None
     AZURE_OPENAI_API_VERSION: str = "2024-02-01"
@@ -82,7 +83,7 @@ class Settings(BaseSettings):
 
     # Embeddings
     EMBEDDING_PROVIDER: Literal["ollama", "huggingface"] = "ollama"
-    EMBEDDING_MODEL: Literal["bge-m3", "text-embedding-3-large", "qwen3-embedding:8b"] = "qwen3-embedding:8b"
+    EMBEDDING_MODEL: Literal["bge-m3", "text-embedding-3-large", "qwen3-embedding:8b", "qwen3-embedding-8b"] = "qwen3-embedding:8b"
     EMBEDDING_DIMENSION: int = 4096
     OLLAMA_ENDPOINT: str = "http://localhost:11434"
     BGE_M3_ENDPOINT: str | None = None

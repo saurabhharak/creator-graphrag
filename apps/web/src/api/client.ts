@@ -325,6 +325,9 @@ export const videoApi = {
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
 export const analyticsApi = {
+  llmBalance: () =>
+    request<{ balance_usd: number | null; currency: string | null; status: string; dashboard_url?: string; message?: string }>('/analytics/llm-balance'),
+
   bookCoverage: (bookId: string) =>
     request<{
       book_id: string;
@@ -364,7 +367,10 @@ export const analyticsApi = {
 
 // ── Health ────────────────────────────────────────────────────────────────────
 export const healthApi = {
-  ready: () => request<{ status: string; services: Record<string, string> }>('/health/ready'),
+  // Health endpoints live at /health/ready (no /v1 prefix) — use fetch directly
+  ready: () =>
+    fetch('/health/ready')
+      .then(r => r.json() as Promise<{ status: string; services: Record<string, string> }>),
 };
 
 export { ApiError };

@@ -4,11 +4,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import httpx
 import structlog
 from fastapi import APIRouter, Query
 from sqlalchemy import cast, func, select, String
 
 from app.api.v1.deps import AdminDep, CurrentUserDep, DbSession
+from app.core.config import settings
 from app.core.errors import NotFoundError
 from app.infrastructure.db.models.books import Book, Chunk
 from app.infrastructure.db.models.knowledge_units import KnowledgeUnit, LlmUsageLog
@@ -156,3 +158,79 @@ async def llm_usage(
             "call_count": totals_row[3] or 0,
         },
     }
+
+
+# ─── LLM provider balance ─────────────────────────────────────────────────────
+
+@router.get("/llm-balance", summary="Fetch LLM provider account balance")
+async def llm_balance(user: CurrentUserDep):
+    """Return the current balance from the Zenmux account.
+
+    Uses ``ZENMUX_USER_TOKEN`` (dashboard session token) to call
+    ``https://zenmux.ai/api/user/info``.  Falls back to a dashboard link
+    if the token is not configured.
+    """
+    base_url = (settings.OPENAI_BASE_URL or "").rstrip("/")
+    user_token = settings.ZENMUX_USER_TOKEN
+
+    # Derive the Zenmux web origin from the API base URL
+    # e.g. https://zenmux.ai/api/v1 → https://zenmux.ai
+    import re
+    origin_match = re.match(r"(https?://[^/]+)", base_url)
+    origin = origin_match.group(1) if origin_match else "https://zenmux.ai"
+    dashboard_url = origin
+
+    if not user_token:
+        return {
+            "balance_usd": None,
+            "currency": None,
+            "status": "token_not_configured",
+            "dashboard_url": dashboard_url,
+            "message": "Add ZENMUX_USER_TOKEN to .env to enable balance lookup",
+        }
+
+    info_url = f"{origin}/api/user/info"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                info_url,
+                headers={"Authorization": f"Bearer {user_token}", "Accept": "application/json"},
+            )
+        if resp.status_code == 200 and "application/json" in resp.headers.get("content-type", ""):
+            data = resp.json()
+            if data.get("success") and data.get("data"):
+                d = data["data"]
+                # One-API style: quota is in 1/500000 USD units
+                quota = d.get("quota", 0)
+                used = d.get("usedQuota", 0)
+                remaining_raw = quota - used
+                balance_usd = round(remaining_raw / 500_000, 4)
+                return {
+                    "balance_usd": balance_usd,
+                    "currency": "USD",
+                    "status": "ok",
+                    "dashboard_url": dashboard_url,
+                }
+            else:
+                return {
+                    "balance_usd": None,
+                    "currency": None,
+                    "status": "token_invalid",
+                    "dashboard_url": dashboard_url,
+                    "message": "Token rejected by Zenmux — check ZENMUX_USER_TOKEN",
+                }
+        else:
+            return {
+                "balance_usd": None,
+                "currency": None,
+                "status": f"error_{resp.status_code}",
+                "dashboard_url": dashboard_url,
+            }
+    except Exception as exc:
+        logger.warning("llm_balance_fetch_failed", error=str(exc))
+        return {
+            "balance_usd": None,
+            "currency": None,
+            "status": "unreachable",
+            "dashboard_url": dashboard_url,
+        }

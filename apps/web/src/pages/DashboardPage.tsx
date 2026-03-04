@@ -1,12 +1,21 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BookOpen, BrainCircuit, Network, Video, Activity, ArrowRight } from 'lucide-react';
-import { booksApi, kuApi, graphApi, type Book, type KnowledgeUnit, type Concept } from '../api/client';
+import { BookOpen, BrainCircuit, Network, Video, Activity, ArrowRight, Wallet } from 'lucide-react';
+import { booksApi, kuApi, graphApi, analyticsApi, type Book, type KnowledgeUnit, type Concept } from '../api/client';
 
 interface DashboardData {
     books: Book[];
     recentKUs: KnowledgeUnit[];
     concepts: Concept[];
+    loading: boolean;
+}
+
+interface LlmBalance {
+    balance_usd: number | null;
+    currency: string | null;
+    status: string;
+    dashboard_url?: string;
+    message?: string;
     loading: boolean;
 }
 
@@ -17,6 +26,9 @@ export default function DashboardPage() {
         recentKUs: [],
         concepts: [],
         loading: true,
+    });
+    const [llmBalance, setLlmBalance] = useState<LlmBalance>({
+        balance_usd: null, currency: null, status: '', loading: true,
     });
 
     useEffect(() => {
@@ -38,7 +50,16 @@ export default function DashboardPage() {
                 setData((d) => ({ ...d, loading: false }));
             }
         }
+        async function loadBalance() {
+            try {
+                const res = await analyticsApi.llmBalance();
+                setLlmBalance({ ...res, loading: false });
+            } catch {
+                setLlmBalance({ balance_usd: null, currency: null, status: 'error', loading: false });
+            }
+        }
         load();
+        loadBalance();
     }, []);
 
     const needsReview = data.recentKUs.filter((ku) => ku.status === 'needs_review').length;
@@ -93,6 +114,57 @@ export default function DashboardPage() {
                         </div>
                         <div className="stat-value" style={{ fontSize: 24 }}>Healthy</div>
                         <div className="stat-sub">All services operational</div>
+                    </div>
+
+                    <div className="stat-card">
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div className="stat-label">Zenmux Balance</div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                {llmBalance.dashboard_url && (
+                                    <a href={llmBalance.dashboard_url} target="_blank" rel="noopener noreferrer"
+                                        style={{ fontSize: 11, color: 'var(--accent-primary)', textDecoration: 'none' }}
+                                        title="Open Zenmux dashboard">
+                                        ↗
+                                    </a>
+                                )}
+                                <Wallet style={{ width: 18, height: 18, color: 'var(--accent-tertiary)' }} />
+                            </div>
+                        </div>
+                        {llmBalance.loading ? (
+                            <div className="stat-value" style={{ fontSize: 24 }}>—</div>
+                        ) : llmBalance.balance_usd !== null ? (
+                            <div className="stat-value" style={{
+                                fontSize: 24,
+                                color: llmBalance.balance_usd <= 0
+                                    ? 'var(--accent-danger)'
+                                    : llmBalance.balance_usd < 5
+                                        ? 'var(--accent-warning)'
+                                        : 'var(--accent-success)',
+                            }}>
+                                ${llmBalance.balance_usd.toFixed(2)}
+                            </div>
+                        ) : (
+                            <div className="stat-value" style={{ fontSize: 15, color: 'var(--text-muted)', marginTop: 6 }}>
+                                {llmBalance.status === 'token_not_configured' ? 'Not set up' : 'Unavailable'}
+                            </div>
+                        )}
+                        <div className="stat-sub" style={{
+                            color: llmBalance.balance_usd !== null && llmBalance.balance_usd <= 0
+                                ? 'var(--accent-danger)' : undefined,
+                            fontSize: 11,
+                        }}>
+                            {llmBalance.loading
+                                ? 'Checking…'
+                                : llmBalance.status === 'ok' && llmBalance.balance_usd !== null && llmBalance.balance_usd <= 0
+                                    ? 'Account overdue — top up required'
+                                : llmBalance.status === 'ok'
+                                    ? `${llmBalance.currency || 'USD'} credit remaining`
+                                : llmBalance.status === 'token_not_configured'
+                                    ? 'Add ZENMUX_USER_TOKEN to .env'
+                                : llmBalance.status === 'token_invalid'
+                                    ? 'Token invalid — check .env'
+                                : 'Could not fetch — check dashboard'}
+                        </div>
                     </div>
                 </div>
 

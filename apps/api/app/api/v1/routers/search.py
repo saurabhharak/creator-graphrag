@@ -14,13 +14,13 @@ from __future__ import annotations
 import re
 import uuid as _uuid
 
-import httpx
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.api.v1.deps import CurrentUserDep
 from app.core.config import settings
+from app.infrastructure.embedding.service import embed_query
 from app.infrastructure.graph import neo4j_client as graph_db
 from app.infrastructure.vector.qdrant import vector_search
 
@@ -98,82 +98,6 @@ def _sanitize(query: str) -> str:
     return cleaned[:2000]
 
 
-async def _embed(query: str) -> list[float]:
-    """Embed a query string. Uses EMBEDDING_PROVIDER setting (ollama or huggingface)."""
-    if settings.EMBEDDING_PROVIDER == "huggingface":
-        return await _embed_via_huggingface(query)
-    return await _embed_via_ollama(query)
-
-
-async def _embed_via_ollama(query: str) -> list[float]:
-    """Embed via local Ollama instance."""
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(
-                f"{settings.OLLAMA_ENDPOINT}/api/embeddings",
-                json={"model": settings.EMBEDDING_MODEL, "prompt": query},
-            )
-            resp.raise_for_status()
-            return resp.json()["embedding"]
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Ollama timed out (model may be loading): {exc}",
-            )
-        except httpx.ConnectError:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=(
-                    "Ollama unavailable. "
-                    f"Ensure Ollama is running at {settings.OLLAMA_ENDPOINT} "
-                    f"with model '{settings.EMBEDDING_MODEL}' pulled."
-                ),
-            )
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Ollama error: {exc.response.text[:200]}",
-            )
-
-
-async def _embed_via_huggingface(query: str) -> list[float]:
-    """Embed via HuggingFace Inference API (Scaleway endpoint)."""
-    if not settings.HF_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="HF_TOKEN not configured. Set HF_TOKEN in .env to use HuggingFace embeddings.",
-        )
-    # Convert Ollama model name to HF format: "qwen3-embedding:8b" → "qwen3-embedding-8b"
-    hf_model = settings.EMBEDDING_MODEL.replace(":", "-")
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            resp = await client.post(
-                settings.HF_EMBEDDING_URL,
-                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
-                json={"input": query, "model": hf_model},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and "data" in data:
-                return data["data"][0]["embedding"]
-            if isinstance(data, list) and len(data) > 0:
-                return data[0] if isinstance(data[0], list) else data
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Unexpected HF embedding response format: {str(data)[:200]}",
-            )
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"HuggingFace embedding timed out: {exc}",
-            )
-        except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"HuggingFace embedding error: {exc}",
-            )
-
-
 async def _build_graph_plan(query: str, graph_opts: GraphOptions) -> dict | None:
     """Return graph-augmented outline beats for the query.
 
@@ -193,7 +117,10 @@ async def _build_graph_plan(query: str, graph_opts: GraphOptions) -> dict | None
     try:
         rel_types_filter = ""
         if graph_opts.relation_types:
-            rel_types_filter = ":" + "|".join(graph_opts.relation_types)
+            safe_re = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,49}$")
+            safe_types = [rt for rt in graph_opts.relation_types if safe_re.match(rt)]
+            if safe_types:
+                rel_types_filter = ":" + "|".join(safe_types)
 
         # Find matching concept nodes
         concepts = await graph_db.run_read(
@@ -283,7 +210,7 @@ async def search(body: HybridSearchRequest, user: CurrentUserDep):
     )
 
     # 2. Embed
-    query_vector = await _embed(clean_query)
+    query_vector = await embed_query(clean_query)
 
     # 3. Qdrant ANN search
     f = body.filters

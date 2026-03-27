@@ -148,10 +148,15 @@ async def list_books(
         language=language,
     )
 
+    # Batch-fetch the latest ingestion job for all books in a single query
+    # instead of N individual queries (fixes N+1).
     job_repo = IngestionJobRepository(db)
+    book_ids = [book.book_id for book in books]
+    latest_jobs = await job_repo.get_latest_for_books(book_ids)
+
     items: list[BookSummary] = []
     for book in books:
-        latest_job = await job_repo.get_latest_for_book(book.book_id)
+        latest_job = latest_jobs.get(book.book_id)
         items.append(
             BookSummary(
                 book_id=book.book_id,
@@ -184,7 +189,7 @@ async def create_book(body: CreateBookRequest, user: EditorOrAdminDep, db: DbSes
     """Create a book record and return a presigned S3 PUT URL for file upload.
 
     Workflow:
-    1. Client POSTs book metadata here → receives ``book_id`` + presigned URL.
+    1. Client POSTs book metadata here -> receives ``book_id`` + presigned URL.
     2. Client PUTs the PDF directly to the presigned URL (no API proxy).
     3. Client calls ``POST /books/{book_id}/upload-complete`` to confirm.
     4. Client calls ``POST /books/{book_id}/ingest`` to start processing.

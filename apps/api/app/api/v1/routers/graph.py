@@ -1,6 +1,7 @@
 """Knowledge graph browse endpoints."""
 from __future__ import annotations
 
+import re
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -8,6 +9,9 @@ from pydantic import BaseModel
 
 from app.api.v1.deps import CurrentUserDep, EditorOrAdminDep
 from app.infrastructure.graph import neo4j_client as graph_db
+
+# Only allow alphanumeric + underscore relation types (must start with a letter).
+_SAFE_REL_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,49}$")
 
 router = APIRouter()
 
@@ -154,9 +158,15 @@ async def get_concept_neighbors(
     Returns all nodes and edges in the neighborhood as flat lists suitable
     for graph visualization.
     """
-    # Build optional relationship type filter
+    # Build optional relationship type filter — validate to prevent Cypher injection
     rel_filter = ""
     if relation_types:
+        for rt in relation_types:
+            if not _SAFE_REL_TYPE_RE.match(rt):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid relation type: '{rt}'. Only alphanumeric and underscore characters allowed.",
+                )
         types_str = "|".join(relation_types)
         rel_filter = f":{types_str}"
 

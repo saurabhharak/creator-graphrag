@@ -53,7 +53,6 @@ RELATION_TYPE_MAP with a RELATES_TO fallback.
 from __future__ import annotations
 
 import re
-import unicodedata
 
 import neo4j
 import structlog
@@ -193,11 +192,9 @@ def _lang_prop(language: str) -> str:
 
 
 def _norm_key(text: str) -> str:
-    """Canonical key for object/process nodes (same logic as unit_extractor)."""
-    text = unicodedata.normalize("NFC", text)
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-    return " ".join(text.split())
+    """Canonical key for object/process nodes — delegates to unit_extractor."""
+    from app.pipelines.unit_extractor import make_canonical_key
+    return make_canonical_key(text)
 
 
 def _domain_label(domain_type: str | None) -> str:

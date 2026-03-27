@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from uuid import UUID
 
 import structlog
@@ -108,6 +109,34 @@ class IngestionJobRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_latest_for_books(
+        self, book_ids: Sequence[UUID]
+    ) -> dict[UUID, IngestionJob]:
+        """Return the most recently created job for each book in a single query.
+
+        Uses PostgreSQL ``DISTINCT ON`` to pick the latest job per book_id,
+        replacing N individual queries with one.
+
+        Args:
+            book_ids: Sequence of book UUIDs to look up.
+
+        Returns:
+            Mapping of book_id -> latest IngestionJob. Books with no jobs
+            are omitted from the dict.
+        """
+        if not book_ids:
+            return {}
+
+        stmt = (
+            select(IngestionJob)
+            .where(IngestionJob.book_id.in_(book_ids))
+            .order_by(IngestionJob.book_id, IngestionJob.created_at.desc())
+            .distinct(IngestionJob.book_id)
+        )
+        result = await self.db.execute(stmt)
+        jobs = result.scalars().all()
+        return {job.book_id: job for job in jobs}
+
     async def count_running_for_user(self, user_id: UUID) -> int:
         """Count active (queued or running) jobs across all books for a user.
 
@@ -147,7 +176,7 @@ class IngestionJobRepository:
             job_id: UUID of the job to update.
             status: New status value (queued|running|failed|completed|canceled).
             stage: Pipeline stage name.
-            progress: Fractional progress 0.0–1.0.
+            progress: Fractional progress 0.0-1.0.
             message: Human-readable status message.
             metrics_json: Pipeline metrics dict (pages_total, chunks_created, etc.).
             error_json: Error detail dict (code, detail).

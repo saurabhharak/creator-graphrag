@@ -3,9 +3,16 @@
 Uses asyncpg directly (raw SQL) so the worker has no dependency on the
 API's SQLAlchemy ORM models. Only the fields touched by the pipeline
 need to be listed here — not the full schema.
+
+Connection pooling
+------------------
+A lazily-created asyncpg pool is shared across all calls that use the
+same DSN.  Call ``close_pool()`` during graceful shutdown to release
+connections.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import traceback as tb
 from typing import Any
@@ -15,11 +22,70 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# ── Connection pool (singleton per DSN) ────────────────────────────────────────
+
+_pools: dict[str, asyncpg.Pool] = {}
+_pool_lock: asyncio.Lock | None = None  # created lazily (needs a running loop)
+
 
 def _pg_url(database_url: str) -> str:
     """Strip the SQLAlchemy asyncpg dialect prefix for raw asyncpg."""
     return database_url.replace("postgresql+asyncpg://", "postgresql://")
 
+
+def _get_pool_lock() -> asyncio.Lock:
+    """Return (and lazily create) the module-level asyncio lock."""
+    global _pool_lock
+    if _pool_lock is None:
+        _pool_lock = asyncio.Lock()
+    return _pool_lock
+
+
+async def get_pool(database_url: str) -> asyncpg.Pool:
+    """Return a shared connection pool for *database_url* (lazy singleton).
+
+    The pool is created on first call and cached for subsequent calls with
+    the same DSN.  ``min_size=2, max_size=10`` keeps a handful of warm
+    connections without over-allocating.
+    """
+    dsn = _pg_url(database_url)
+    pool = _pools.get(dsn)
+    if pool is not None:
+        return pool
+
+    async with _get_pool_lock():
+        # Double-check after acquiring the lock
+        pool = _pools.get(dsn)
+        if pool is not None:
+            return pool
+
+        pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
+        _pools[dsn] = pool
+        logger.info("pg_pool_created", dsn=dsn[:dsn.find("@") + 1] + "***")
+        return pool
+
+
+async def close_pool(database_url: str | None = None) -> None:
+    """Close one or all cached connection pools.
+
+    Args:
+        database_url: If given, close only the pool for this DSN.
+                      If ``None``, close **all** cached pools.
+    """
+    if database_url is not None:
+        dsn = _pg_url(database_url)
+        pool = _pools.pop(dsn, None)
+        if pool is not None:
+            await pool.close()
+            logger.info("pg_pool_closed", dsn=dsn[:dsn.find("@") + 1] + "***")
+    else:
+        for dsn, pool in list(_pools.items()):
+            await pool.close()
+            logger.info("pg_pool_closed", dsn=dsn[:dsn.find("@") + 1] + "***")
+        _pools.clear()
+
+
+# ── Job status ─────────────────────────────────────────────────────────────────
 
 async def update_job_status(
     database_url: str,
@@ -38,8 +104,7 @@ async def update_job_status(
     Only non-None keyword arguments are applied so callers can update
     a single field without touching the others.
 
-    Opens a short-lived asyncpg connection per call (acceptable — called
-    ~14 times per ingestion; overhead ~5 ms/call).
+    Uses a shared asyncpg connection pool for efficiency.
 
     Args:
         database_url: PostgreSQL DSN from worker_settings.DATABASE_URL.
@@ -94,25 +159,24 @@ async def update_job_status(
         f"WHERE job_id = ${idx}::uuid"
     )
 
-    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
-    try:
-        await conn.execute(sql, *params)
-        logger.debug(
-            "job_status_updated",
-            job_id=job_id,
-            status=status,
-            stage=stage,
-            progress=progress,
-        )
-    except Exception:
-        logger.error(
-            "job_status_update_failed",
-            job_id=job_id,
-            exc_info=True,
-        )
-        raise
-    finally:
-        await conn.close()
+    pool = await get_pool(database_url)
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(sql, *params)
+            logger.debug(
+                "job_status_updated",
+                job_id=job_id,
+                status=status,
+                stage=stage,
+                progress=progress,
+            )
+        except Exception:
+            logger.error(
+                "job_status_update_failed",
+                job_id=job_id,
+                exc_info=True,
+            )
+            raise
 
     # Publish to Redis pub/sub for SSE streaming (non-blocking, non-critical)
     try:
@@ -127,6 +191,8 @@ async def update_job_status(
     except Exception:
         pass
 
+
+# ── Knowledge units ────────────────────────────────────────────────────────────
 
 async def insert_knowledge_units(database_url: str, units: list[dict]) -> None:
     """Bulk INSERT knowledge_unit rows via asyncpg executemany.
@@ -176,16 +242,17 @@ async def insert_knowledge_units(database_url: str, units: list[dict]) -> None:
         for u in units
     ]
 
-    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
-    try:
-        await conn.executemany(sql, rows)
-        logger.info("knowledge_units_inserted", count=len(rows))
-    except Exception:
-        logger.error("knowledge_units_insert_failed", exc_info=True)
-        raise
-    finally:
-        await conn.close()
+    pool = await get_pool(database_url)
+    async with pool.acquire() as conn:
+        try:
+            await conn.executemany(sql, rows)
+            logger.info("knowledge_units_inserted", count=len(rows))
+        except Exception:
+            logger.error("knowledge_units_insert_failed", exc_info=True)
+            raise
 
+
+# ── Chunks ─────────────────────────────────────────────────────────────────────
 
 async def insert_chunks(database_url: str, chunks_data: list[dict]) -> None:
     """Bulk INSERT chunk rows via asyncpg executemany.
@@ -233,16 +300,17 @@ async def insert_chunks(database_url: str, chunks_data: list[dict]) -> None:
         for c in chunks_data
     ]
 
-    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
-    try:
-        await conn.executemany(sql, rows)
-        logger.info("chunks_inserted", count=len(rows))
-    except Exception:
-        logger.error("chunks_insert_failed", exc_info=True)
-        raise
-    finally:
-        await conn.close()
+    pool = await get_pool(database_url)
+    async with pool.acquire() as conn:
+        try:
+            await conn.executemany(sql, rows)
+            logger.info("chunks_inserted", count=len(rows))
+        except Exception:
+            logger.error("chunks_insert_failed", exc_info=True)
+            raise
 
+
+# ── LLM usage logging ─────────────────────────────────────────────────────────
 
 async def log_llm_usage(
     database_url: str,
@@ -289,33 +357,34 @@ async def log_llm_usage(
         )
     """
 
-    conn: asyncpg.Connection = await asyncpg.connect(_pg_url(database_url))
-    try:
-        await conn.execute(
-            sql,
-            str(_uuid.uuid4()),
-            operation_type,
-            model_id,
-            input_tokens,
-            output_tokens,
-            estimated_cost,
-            book_id,
-            job_id,
-        )
-        logger.debug(
-            "llm_usage_logged",
-            op=operation_type,
-            model=model_id,
-            in_tok=input_tokens,
-            out_tok=output_tokens,
-            cost_usd=estimated_cost,
-        )
-    except Exception:
-        # Non-critical — don't fail the pipeline if cost logging fails
-        logger.warning("llm_usage_log_failed", exc_info=True)
-    finally:
-        await conn.close()
+    pool = await get_pool(database_url)
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                sql,
+                str(_uuid.uuid4()),
+                operation_type,
+                model_id,
+                input_tokens,
+                output_tokens,
+                estimated_cost,
+                book_id,
+                job_id,
+            )
+            logger.debug(
+                "llm_usage_logged",
+                op=operation_type,
+                model=model_id,
+                in_tok=input_tokens,
+                out_tok=output_tokens,
+                cost_usd=estimated_cost,
+            )
+        except Exception:
+            # Non-critical — don't fail the pipeline if cost logging fails
+            logger.warning("llm_usage_log_failed", exc_info=True)
 
+
+# ── Redis pub/sub ──────────────────────────────────────────────────────────────
 
 async def publish_job_event(
     redis_url: str,
@@ -350,19 +419,20 @@ async def publish_job_event(
         logger.warning("redis_publish_failed", job_id=job_id)
 
 
+# ── Book lookup ────────────────────────────────────────────────────────────────
+
 async def fetch_book_title(database_url: str, book_id: str) -> str:
     """Return the title of a book by its UUID, or empty string if not found."""
-    url = _pg_url(database_url)
-    conn: asyncpg.Connection = await asyncpg.connect(url)
-    try:
+    pool = await get_pool(database_url)
+    async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT title FROM books WHERE book_id = $1::uuid",
             book_id,
         )
         return row["title"] if row else ""
-    finally:
-        await conn.close()
 
+
+# ── Error formatting ──────────────────────────────────────────────────────────
 
 def format_error(exc: BaseException) -> dict[str, str]:
     """Build a compact error_json dict from an exception."""

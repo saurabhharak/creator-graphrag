@@ -37,7 +37,7 @@ async def book_coverage(
         await db.execute(
             select(Book).where(
                 Book.book_id == book_id,
-                Book.owner_id == user.user_id,
+                Book.created_by == user.user_id,
                 Book.deleted_at.is_(None),
             )
         )

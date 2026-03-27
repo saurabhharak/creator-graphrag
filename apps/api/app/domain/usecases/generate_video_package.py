@@ -19,7 +19,6 @@ import uuid
 from pathlib import Path
 from uuid import UUID
 
-import httpx
 import jinja2
 import openai
 import structlog
@@ -27,6 +26,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.infrastructure.embedding.service import embed_query
 from app.domain.policies.citation_enforcement import (
     CitationEnforcementError,
     CitationEnforcementPolicy,
@@ -105,75 +105,6 @@ def _sanitize_topic(topic: str) -> str:
     cleaned = _INJECTION_RE.sub("", topic).strip()
     cleaned = "".join(c for c in cleaned if c >= " " or c in "\t\n")
     return cleaned[:500]
-
-
-async def _embed_query(query: str) -> list[float]:
-    """Embed a query string. Uses EMBEDDING_PROVIDER setting (ollama or huggingface)."""
-    if settings.EMBEDDING_PROVIDER == "huggingface":
-        return await _embed_via_huggingface(query)
-    return await _embed_via_ollama(query)
-
-
-async def _embed_via_ollama(query: str) -> list[float]:
-    """Embed via local Ollama instance."""
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(
-                f"{settings.OLLAMA_ENDPOINT}/api/embeddings",
-                json={"model": settings.EMBEDDING_MODEL, "prompt": query},
-            )
-            resp.raise_for_status()
-            return resp.json()["embedding"]
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"Ollama timed out (model may be loading): {exc}",
-            )
-        except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Ollama unavailable: {exc}",
-            )
-
-
-async def _embed_via_huggingface(query: str) -> list[float]:
-    """Embed via HuggingFace Inference API (Scaleway endpoint)."""
-    if not settings.HF_TOKEN:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="HF_TOKEN not configured. Set HF_TOKEN in .env to use HuggingFace embeddings.",
-        )
-    # Convert Ollama model name to HF format: "qwen3-embedding:8b" → "qwen3-embedding-8b"
-    hf_model = settings.EMBEDDING_MODEL.replace(":", "-")
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            resp = await client.post(
-                settings.HF_EMBEDDING_URL,
-                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
-                json={"input": query, "model": hf_model},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # HF returns {"data": [{"embedding": [...]}]} (OpenAI-compatible)
-            if isinstance(data, dict) and "data" in data:
-                return data["data"][0]["embedding"]
-            # Or direct list format
-            if isinstance(data, list) and len(data) > 0:
-                return data[0] if isinstance(data[0], list) else data
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Unexpected HF embedding response format: {str(data)[:200]}",
-            )
-        except httpx.TimeoutException as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=f"HuggingFace embedding timed out: {exc}",
-            )
-        except (httpx.ConnectError, httpx.HTTPStatusError) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"HuggingFace embedding error: {exc}",
-            )
 
 
 def _resolve_scene_range(
@@ -325,7 +256,7 @@ class GenerateVideoPackageUsecase:
         repair_mode = citation_repair_mode or settings.CITATION_REPAIR_MODE
 
         # ── 2. Evidence retrieval ─────────────────────────────────────────
-        query_vector = await _embed_query(topic_clean)
+        query_vector = await embed_query(topic_clean)
         evidence_chunks = await vector_search(
             collection=settings.QDRANT_COLLECTION_NAME,
             query_vector=query_vector,
